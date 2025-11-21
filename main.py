@@ -13,12 +13,12 @@ class Person(BaseModel):
     address: Optional[str] = None
     note_name: Optional[str] = None
     screenshot_base64: Optional[str] = None
+    command: Optional[str] = None  # <--- NEW FIELD
 
 users = {}
 
 @app.post("/user/{user_id}")
 def set_user_data(user_id: str, person: Person):
-    # Merge existing data with new data
     existing = users.get(user_id, {})
     updated = {**existing, **{k: v for k, v in person.dict().items() if v is not None}}
     users[user_id] = updated
