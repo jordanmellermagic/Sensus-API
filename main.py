@@ -2,14 +2,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime, date
-from fastapi import FastAPI
-from pydantic import BaseModel
-from push import send_push
+from push import send_push  # <-- your push helper
 
 app = FastAPI()
 
-# TEMP: store subscriptions in memory
-# (You will later tie this to user records)
+# ------------------------------------------------
+# TEMP: IN-MEMORY PUSH SUBSCRIPTIONS
+# ------------------------------------------------
 PUSH_SUBSCRIPTIONS = []
 
 class SubscriptionModel(BaseModel):
@@ -20,28 +19,28 @@ def save_subscription(data: SubscriptionModel):
     PUSH_SUBSCRIPTIONS.append(data.subscription)
     return {"ok": True}
 
-app = FastAPI()
 
 # ------------------------------------------------
-# 🚨 CORS FIX – REQUIRED FOR REACT TO ACCESS API
+# CORS (NEEDED FOR REACT FRONTEND)
 # ------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # You can restrict later if you want
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
 # ------------------------------------------------
-# 🧩 DATA MODEL
+# PERSON MODEL
 # ------------------------------------------------
 class Person(BaseModel):
     first_name: str = ""
     last_name: str = ""
     phone_number: str = ""
-    birthday: str = ""     # YYYY-MM-DD string
-    days_alive: int = 0    # auto-calculated on save
+    birthday: str = ""       # YYYY-MM-DD
+    days_alive: int = 0
     address: str = ""
     note_name: str = ""
     screenshot_base64: str = ""
@@ -49,22 +48,17 @@ class Person(BaseModel):
 
 
 # ------------------------------------------------
-# 💾 In-memory “database”
+# IN-MEMORY DB
 # ------------------------------------------------
 db: dict[str, Person] = {}
 
 
 # ------------------------------------------------
-# 🔢 Helper: calculate days alive
+# HELPER: compute days alive
 # ------------------------------------------------
 def compute_days_alive(birthday_str: str) -> int:
-    """
-    Returns number of days alive based on YYYY-MM-DD string.
-    Returns 0 if invalid or empty.
-    """
     if not birthday_str:
         return 0
-
     try:
         bday = datetime.strptime(birthday_str, "%Y-%m-%d").date()
         today = date.today()
@@ -74,7 +68,7 @@ def compute_days_alive(birthday_str: str) -> int:
 
 
 # ------------------------------------------------
-# 🟢 GET /user/{user_id}
+# GET /user/{user_id}
 # ------------------------------------------------
 @app.get("/user/{user_id}")
 def get_user(user_id: str):
@@ -84,33 +78,37 @@ def get_user(user_id: str):
 
 
 # ------------------------------------------------
-# 🟡 POST /user/{user_id}
+# POST /user/{user_id}  (MAIN UPDATE + NOTIFICATIONS)
 # ------------------------------------------------
 @app.post("/user/{user_id}")
 def set_user(user_id: str, payload: Person):
 
-    # Auto-calc days alive on every POST
-    days = compute_days_alive(payload.birthday)
-    payload.days_alive = days
+    # Fetch old data BEFORE saving
+    old = db.get(user_id)
 
-    # Save to "database"
+    # Auto calculate days alive
+    payload.days_alive = compute_days_alive(payload.birthday)
+
+    # Save new data
     db[user_id] = payload
+
+    # ----- 🔔 PUSH NOTIFICATION ON note_name CHANGE -----
+    if old and old.note_name != payload.note_name:
+        print("note_name changed! sending push notifications...")
+
+        for sub in PUSH_SUBSCRIPTIONS:
+            send_push(
+                sub,
+                "Note Updated",
+                f"New note: {payload.note_name}"
+            )
+    # ----------------------------------------------------
+
     return {"status": "saved", "user_id": user_id, "data": payload}
-    
-    @app.post("/user/{user_id}")
-def update_user(user_id: str, new_data: dict):
-    # get old user
-    old = DB.get_user(user_id)
-    
-    # save new user (full overwrite)
-    DB.save_user(user_id, new_data)
-
-    return new_data
-
 
 
 # ------------------------------------------------
-# 🔴 DELETE /user/{user_id}
+# DELETE /user/{user_id}
 # ------------------------------------------------
 @app.delete("/user/{user_id}")
 def delete_user(user_id: str):
@@ -121,7 +119,7 @@ def delete_user(user_id: str):
 
 
 # ------------------------------------------------
-# 🏠 ROOT (Optional)
+# ROOT CHECK
 # ------------------------------------------------
 @app.get("/")
 def root():
