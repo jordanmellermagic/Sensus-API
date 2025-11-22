@@ -96,6 +96,17 @@ def set_user(user_id: str, payload: Person):
     # Save to "database"
     db[user_id] = payload
     return {"status": "saved", "user_id": user_id, "data": payload}
+    
+    @app.post("/user/{user_id}")
+def update_user(user_id: str, new_data: dict):
+    # get old user
+    old = DB.get_user(user_id)
+    
+    # save new user (full overwrite)
+    DB.save_user(user_id, new_data)
+
+    return new_data
+
 
 
 # ------------------------------------------------
