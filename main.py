@@ -207,16 +207,64 @@ def send_user_pushes(user: User, title: str, body: str):
 
 
 # ------------------------------------------------
+# NEW GET SPLIT ENDPOINTS
+# ------------------------------------------------
+
+@app.get("/data_peek/{user_id}")
+def get_data_peek(user_id: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(404, "User not found")
+    return {
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "job_title": user.job_title,
+        "phone_number": user.phone_number,
+        "birthday": user.birthday,
+        "address": user.address,
+    }
+
+
+@app.get("/note_peek/{user_id}")
+def get_note_peek(user_id: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(404, "User not found")
+    return {
+        "note_name": user.note_name,
+        "note_body": user.note_body
+    }
+
+
+@app.get("/screen_peek/{user_id}")
+def get_screen_peek(user_id: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(404, "User not found")
+    return {
+        "contact": user.contact,
+        "url": user.url,
+        "screenshot_path": user.screenshot_path
+    }
+
+
+@app.get("/commands/{user_id}")
+def get_commands(user_id: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(404, "User not found")
+    return {
+        "command": user.command
+    }
+
+
+# ------------------------------------------------
 # PUSH SUBSCRIPTIONS
 # ------------------------------------------------
 
 @app.post("/push/subscribe/{user_id}")
 def subscribe_push(user_id: str, payload: SubscriptionModel, db: Session = Depends(get_db)):
-    """
-    Store (or replace) the web push subscription for this user.
-    """
     user = get_or_create_user(db, user_id)
-    # Simple strategy: keep only the latest subscription per user
     db.query(PushSubscription).filter(PushSubscription.user_id == user.id).delete()
     sub = PushSubscription(user_id=user.id, subscription_json=json.dumps(payload.subscription))
     db.add(sub)
@@ -230,9 +278,6 @@ def subscribe_push(user_id: str, payload: SubscriptionModel, db: Session = Depen
 
 @app.get("/user/{user_id}", response_model=UserSnapshot)
 def get_user(user_id: str, db: Session = Depends(get_db)):
-    """
-    Get a snapshot of all data for this user.
-    """
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -241,9 +286,6 @@ def get_user(user_id: str, db: Session = Depends(get_db)):
 
 @app.delete("/user/{user_id}")
 def delete_user(user_id: str, db: Session = Depends(get_db)):
-    """
-    Delete a user and all related data (including push subscriptions).
-    """
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -253,15 +295,11 @@ def delete_user(user_id: str, db: Session = Depends(get_db)):
 
 
 # ------------------------------------------------
-# data_peek (first_name, last_name, job_title, phone_number, birthday, address)
+# data_peek UPDATE
 # ------------------------------------------------
 
 @app.post("/data_peek/{user_id}", response_model=UserSnapshot)
 def update_data_peek(user_id: str, update: DataPeekUpdate, db: Session = Depends(get_db)):
-    """
-    Merge-safe update of data_peek fields.
-    Only provided fields are updated; everything else persists.
-    """
     user = get_or_create_user(db, user_id)
     changed = False
 
@@ -280,15 +318,11 @@ def update_data_peek(user_id: str, update: DataPeekUpdate, db: Session = Depends
 
 
 # ------------------------------------------------
-# note_peek (note_name, note_body) with push notifications
+# note_peek UPDATE
 # ------------------------------------------------
 
 @app.post("/note_peek/{user_id}", response_model=UserSnapshot)
 def update_note_peek(user_id: str, update: NotePeekUpdate, db: Session = Depends(get_db)):
-    """
-    Merge-safe update of note_peek fields.
-    Sends a push notification when the note changes.
-    """
     user = get_or_create_user(db, user_id)
     before_name = user.note_name
     before_body = user.note_body
@@ -315,11 +349,6 @@ def update_note_peek(user_id: str, update: NotePeekUpdate, db: Session = Depends
 
 @app.post("/screen_peek/{user_id}", response_model=UserSnapshot)
 def update_screen_peek_json(user_id: str, update: ScreenPeekUpdate, db: Session = Depends(get_db)):
-    """
-    JSON-based screen_peek updates.
-    - contact, url: regular strings
-    - screenshot: base64 string (optional)
-    """
     user = get_or_create_user(db, user_id)
     before_path = user.screenshot_path
     before_contact = user.contact
@@ -347,7 +376,7 @@ def update_screen_peek_json(user_id: str, update: ScreenPeekUpdate, db: Session 
 
 
 # ------------------------------------------------
-# screen_peek (file upload: screenshot as JPEG/PNG)
+# screen_peek (FILE UPLOAD)
 # ------------------------------------------------
 
 @app.post("/screen_peek/{user_id}/upload", response_model=UserSnapshot)
@@ -358,11 +387,6 @@ def update_screen_peek_file(
     screenshot: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
-    """
-    File-upload-based screen_peek updates.
-    - screenshot: real file (JPEG/PNG)
-    - contact, url: optional form fields
-    """
     user = get_or_create_user(db, user_id)
     before_path = user.screenshot_path
     before_contact = user.contact
@@ -379,7 +403,11 @@ def update_screen_peek_file(
     db.commit()
     db.refresh(user)
 
-    if (before_path != user.screenshot_path) or (before_contact != user.contact) or (before_url != user.url):
+    if (
+        before_path != user.screenshot_path
+        or before_contact != user.contact
+        or before_url != user.url
+    ):
         title = "Screen updated"
         body = user.url or user.contact or "Screen peek updated."
         send_user_pushes(user, title, body)
@@ -393,9 +421,6 @@ def update_screen_peek_file(
 
 @app.get("/screen_peek/{user_id}/screenshot")
 def get_screen_peek_screenshot(user_id: str, db: Session = Depends(get_db)):
-    """
-    Download the latest screenshot file for this user, if it exists.
-    """
     user = db.query(User).filter(User.id == user_id).first()
     if not user or not user.screenshot_path:
         raise HTTPException(status_code=404, detail="Screenshot not found")
@@ -406,14 +431,11 @@ def get_screen_peek_screenshot(user_id: str, db: Session = Depends(get_db)):
 
 
 # ------------------------------------------------
-# commands (separate split with 'command' value)
+# commands UPDATE + GET
 # ------------------------------------------------
 
 @app.post("/commands/{user_id}", response_model=UserSnapshot)
 def update_command(user_id: str, update: CommandUpdate, db: Session = Depends(get_db)):
-    """
-    Set or clear the current command for this user.
-    """
     user = get_or_create_user(db, user_id)
     data = update.dict(exclude_unset=True)
     if "command" in data:
@@ -427,13 +449,10 @@ def update_command(user_id: str, update: CommandUpdate, db: Session = Depends(ge
 
 @app.get("/commands/{user_id}")
 def get_command(user_id: str, db: Session = Depends(get_db)):
-    """
-    Fetch the current command for this user.
-    """
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    return {"user_id": user.id, "command": user.command}
+    return {"command": user.command}
 
 
 # ------------------------------------------------
