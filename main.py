@@ -29,7 +29,6 @@ Base = declarative_base()
 class User(Base):
     __tablename__ = "users"
 
-    # Multi-user: each user gets a unique id (string)
     id = Column(String, primary_key=True, index=True)
 
     # data_peek fields
@@ -40,19 +39,19 @@ class User(Base):
     birthday = Column(Date, nullable=True)
     address = Column(String, nullable=True)
 
-    # note_peek fields
+    # note_peek
     note_name = Column(Text, nullable=True)
     note_body = Column(Text, nullable=True)
 
-    # screen_peek fields
+    # screen_peek
     contact = Column(String, nullable=True)
-    screenshot_path = Column(String, nullable=True)  # file path to saved screenshot
+    screenshot_path = Column(String, nullable=True)
     url = Column(Text, nullable=True)
 
     # commands
     command = Column(Text, nullable=True)
 
-    # timestamps (backend metadata)
+    # timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     data_peek_updated_at = Column(DateTime, nullable=True)
@@ -83,6 +82,7 @@ def get_db():
 
 Base.metadata.create_all(bind=engine)
 
+
 # ------------------------------------------------
 # APP + CORS
 # ------------------------------------------------
@@ -91,7 +91,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # You can restrict this in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -100,10 +100,10 @@ app.add_middleware(
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
-# ------------------------------------------------
-# Pydantic SCHEMAS
-# ------------------------------------------------
 
+# ------------------------------------------------
+# SCHEMAS
+# ------------------------------------------------
 
 class DataPeekUpdate(BaseModel):
     first_name: Optional[str] = None
@@ -119,12 +119,6 @@ class NotePeekUpdate(BaseModel):
     note_body: Optional[str] = None
 
 
-class ScreenPeekUpdate(BaseModel):
-    contact: Optional[str] = None
-    screenshot: Optional[str] = None  # base64 string when using JSON endpoint
-    url: Optional[str] = None
-
-
 class CommandUpdate(BaseModel):
     command: Optional[str] = None
 
@@ -135,18 +129,18 @@ class SubscriptionModel(BaseModel):
 
 class UserSnapshot(BaseModel):
     id: str
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    job_title: Optional[str] = None
-    phone_number: Optional[str] = None
-    birthday: Optional[date] = None
-    address: Optional[str] = None
-    note_name: Optional[str] = None
-    note_body: Optional[str] = None
-    contact: Optional[str] = None
-    screenshot_path: Optional[str] = None
-    url: Optional[str] = None
-    command: Optional[str] = None
+    first_name: Optional[str]
+    last_name: Optional[str]
+    job_title: Optional[str]
+    phone_number: Optional[str]
+    birthday: Optional[date]
+    address: Optional[str]
+    note_name: Optional[str]
+    note_body: Optional[str]
+    contact: Optional[str]
+    screenshot_path: Optional[str]
+    url: Optional[str]
+    command: Optional[str]
 
     class Config:
         orm_mode = True
@@ -157,10 +151,6 @@ class UserSnapshot(BaseModel):
 # ------------------------------------------------
 
 def get_or_create_user(db: Session, user_id: str) -> User:
-    """
-    Fetch a user by id or create a new one.
-    This makes all endpoints naturally multi-user: each user_id is independent.
-    """
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         user = User(id=user_id)
@@ -171,9 +161,6 @@ def get_or_create_user(db: Session, user_id: str) -> User:
 
 
 def save_screenshot_file(user_id: str, upload: UploadFile) -> str:
-    """
-    Save an uploaded screenshot file (JPEG/PNG) and return its path.
-    """
     suffix = Path(upload.filename).suffix or ".jpg"
     filename = f"{user_id}_{int(datetime.utcnow().timestamp())}{suffix}"
     dest = UPLOAD_DIR / filename
@@ -182,22 +169,7 @@ def save_screenshot_file(user_id: str, upload: UploadFile) -> str:
     return str(dest)
 
 
-def save_base64_screenshot(user_id: str, b64_data: str) -> str:
-    """
-    Save a base64-encoded screenshot as a JPEG and return its path.
-    """
-    import base64
-    filename = f"{user_id}_{int(datetime.utcnow().timestamp())}.jpg"
-    dest = UPLOAD_DIR / filename
-    with dest.open("wb") as f:
-        f.write(base64.b64decode(b64_data))
-    return str(dest)
-
-
 def send_user_pushes(user: User, title: str, body: str):
-    """
-    Send a web push notification to all of this user's subscriptions.
-    """
     for sub in user.subscriptions:
         try:
             subscription = json.loads(sub.subscription_json)
@@ -212,50 +184,41 @@ def send_user_pushes(user: User, title: str, body: str):
 
 @app.get("/data_peek/{user_id}")
 def get_data_peek(user_id: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u:
         raise HTTPException(404, "User not found")
     return {
-        "first_name": user.first_name,
-        "last_name": user.last_name,
-        "job_title": user.job_title,
-        "phone_number": user.phone_number,
-        "birthday": user.birthday,
-        "address": user.address,
+        "first_name": u.first_name,
+        "last_name": u.last_name,
+        "job_title": u.job_title,
+        "phone_number": u.phone_number,
+        "birthday": u.birthday,
+        "address": u.address
     }
 
 
 @app.get("/note_peek/{user_id}")
 def get_note_peek(user_id: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u:
         raise HTTPException(404, "User not found")
-    return {
-        "note_name": user.note_name,
-        "note_body": user.note_body
-    }
+    return {"note_name": u.note_name, "note_body": u.note_body}
 
 
 @app.get("/screen_peek/{user_id}")
 def get_screen_peek(user_id: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u:
         raise HTTPException(404, "User not found")
-    return {
-        "contact": user.contact,
-        "url": user.url,
-        "screenshot_path": user.screenshot_path
-    }
+    return {"contact": u.contact, "url": u.url, "screenshot_path": u.screenshot_path}
 
 
 @app.get("/commands/{user_id}")
 def get_commands(user_id: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u:
         raise HTTPException(404, "User not found")
-    return {
-        "command": user.command
-    }
+    return {"command": u.command}
 
 
 # ------------------------------------------------
@@ -278,18 +241,18 @@ def subscribe_push(user_id: str, payload: SubscriptionModel, db: Session = Depen
 
 @app.get("/user/{user_id}", response_model=UserSnapshot)
 def get_user(user_id: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return user
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u:
+        raise HTTPException(404, "User not found")
+    return u
 
 
 @app.delete("/user/{user_id}")
 def delete_user(user_id: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    db.delete(user)
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u:
+        raise HTTPException(404, "User not found")
+    db.delete(u)
     db.commit()
     return {"status": "deleted", "user_id": user_id}
 
@@ -300,21 +263,21 @@ def delete_user(user_id: str, db: Session = Depends(get_db)):
 
 @app.post("/data_peek/{user_id}", response_model=UserSnapshot)
 def update_data_peek(user_id: str, update: DataPeekUpdate, db: Session = Depends(get_db)):
-    user = get_or_create_user(db, user_id)
+    u = get_or_create_user(db, user_id)
     changed = False
 
     for field, value in update.dict(exclude_unset=True).items():
-        if getattr(user, field) != value:
-            setattr(user, field, value)
+        if getattr(u, field) != value:
+            setattr(u, field, value)
             changed = True
 
     if changed:
-        user.data_peek_updated_at = datetime.utcnow()
-        db.add(user)
+        u.data_peek_updated_at = datetime.utcnow()
+        db.add(u)
         db.commit()
-        db.refresh(user)
+        db.refresh(u)
 
-    return user
+    return u
 
 
 # ------------------------------------------------
@@ -323,96 +286,68 @@ def update_data_peek(user_id: str, update: DataPeekUpdate, db: Session = Depends
 
 @app.post("/note_peek/{user_id}", response_model=UserSnapshot)
 def update_note_peek(user_id: str, update: NotePeekUpdate, db: Session = Depends(get_db)):
-    user = get_or_create_user(db, user_id)
-    before_name = user.note_name
-    before_body = user.note_body
+    u = get_or_create_user(db, user_id)
+    before_name = u.note_name
+    before_body = u.note_body
 
     for field, value in update.dict(exclude_unset=True).items():
-        setattr(user, field, value)
+        setattr(u, field, value)
 
-    user.note_peek_updated_at = datetime.utcnow()
-    db.add(user)
+    u.note_peek_updated_at = datetime.utcnow()
+    db.add(u)
     db.commit()
-    db.refresh(user)
+    db.refresh(u)
 
-    if (before_name != user.note_name) or (before_body != user.note_body):
+    if before_name != u.note_name or before_body != u.note_body:
         title = "Note updated"
-        body = user.note_name or "Your note was updated."
-        send_user_pushes(user, title, body)
+        body = u.note_name or "Your note was updated."
+        send_user_pushes(u, title, body)
 
-    return user
+    return u
 
 
 # ------------------------------------------------
-# screen_peek (JSON: base64 screenshot)
+# screen_peek UPDATE (FILE-BASED ONLY)
 # ------------------------------------------------
 
 @app.post("/screen_peek/{user_id}", response_model=UserSnapshot)
-def update_screen_peek_json(user_id: str, update: ScreenPeekUpdate, db: Session = Depends(get_db)):
-    user = get_or_create_user(db, user_id)
-    before_path = user.screenshot_path
-    before_contact = user.contact
-    before_url = user.url
-
-    data = update.dict(exclude_unset=True)
-    if "screenshot" in data and data["screenshot"]:
-        user.screenshot_path = save_base64_screenshot(user_id, data["screenshot"])
-        data.pop("screenshot")
-
-    for field, value in data.items():
-        setattr(user, field, value)
-
-    user.screen_peek_updated_at = datetime.utcnow()
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-
-    if (before_path != user.screenshot_path) or (before_contact != user.contact) or (before_url != user.url):
-        title = "Screen updated"
-        body = user.url or user.contact or "Screen peek updated."
-        send_user_pushes(user, title, body)
-
-    return user
-
-
-# ------------------------------------------------
-# screen_peek (FILE UPLOAD)
-# ------------------------------------------------
-
-@app.post("/screen_peek/{user_id}/upload", response_model=UserSnapshot)
-def update_screen_peek_file(
+async def update_screen_peek(
     user_id: str,
+    screenshot: Optional[UploadFile] = File(None),
     contact: Optional[str] = Form(None),
     url: Optional[str] = Form(None),
-    screenshot: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
-    user = get_or_create_user(db, user_id)
-    before_path = user.screenshot_path
-    before_contact = user.contact
-    before_url = user.url
+    u = get_or_create_user(db, user_id)
 
-    user.screenshot_path = save_screenshot_file(user_id, screenshot)
+    before_path = u.screenshot_path
+    before_contact = u.contact
+    before_url = u.url
+
+    if screenshot is not None:
+        u.screenshot_path = save_screenshot_file(user_id, screenshot)
+
     if contact is not None:
-        user.contact = contact
-    if url is not None:
-        user.url = url
+        u.contact = contact
 
-    user.screen_peek_updated_at = datetime.utcnow()
-    db.add(user)
+    if url is not None:
+        u.url = url
+
+    u.screen_peek_updated_at = datetime.utcnow()
+    db.add(u)
     db.commit()
-    db.refresh(user)
+    db.refresh(u)
 
     if (
-        before_path != user.screenshot_path
-        or before_contact != user.contact
-        or before_url != user.url
+        before_path != u.screenshot_path
+        or before_contact != u.contact
+        or before_url != u.url
     ):
         title = "Screen updated"
-        body = user.url or user.contact or "Screen peek updated."
-        send_user_pushes(user, title, body)
+        body = u.url or u.contact or "Screen peek updated."
+        send_user_pushes(u, title, body)
 
-    return user
+    return u
 
 
 # ------------------------------------------------
@@ -421,38 +356,37 @@ def update_screen_peek_file(
 
 @app.get("/screen_peek/{user_id}/screenshot")
 def get_screen_peek_screenshot(user_id: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user or not user.screenshot_path:
-        raise HTTPException(status_code=404, detail="Screenshot not found")
-    path = Path(user.screenshot_path)
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u or not u.screenshot_path:
+        raise HTTPException(404, "Screenshot not found")
+    path = Path(u.screenshot_path)
     if not path.exists():
-        raise HTTPException(status_code=404, detail="Screenshot file missing")
+        raise HTTPException(404, "Screenshot file missing")
     return FileResponse(path)
 
 
 # ------------------------------------------------
-# commands UPDATE + GET
+# commands
 # ------------------------------------------------
 
 @app.post("/commands/{user_id}", response_model=UserSnapshot)
 def update_command(user_id: str, update: CommandUpdate, db: Session = Depends(get_db)):
-    user = get_or_create_user(db, user_id)
-    data = update.dict(exclude_unset=True)
-    if "command" in data:
-        user.command = data["command"]
-        user.command_updated_at = datetime.utcnow()
-        db.add(user)
+    u = get_or_create_user(db, user_id)
+    if update.command is not None:
+        u.command = update.command
+        u.command_updated_at = datetime.utcnow()
+        db.add(u)
         db.commit()
-        db.refresh(user)
-    return user
+        db.refresh(u)
+    return u
 
 
 @app.get("/commands/{user_id}")
 def get_command(user_id: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return {"command": user.command}
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u:
+        raise HTTPException(404, "User not found")
+    return {"command": u.command}
 
 
 # ------------------------------------------------
