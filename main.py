@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from datetime import datetime, date
 from typing import Optional
 from sqlalchemy import create_engine, Column, String, Integer, Date, DateTime, Text, ForeignKey
@@ -36,7 +36,7 @@ class User(Base):
     last_name = Column(String, nullable=True)
     job_title = Column(String, nullable=True)
     phone_number = Column(String, nullable=True)
-    birthday = Column(Date, nullable=True)
+    birthday = Column(Date, nullable=True)       # stored as full date (year may be placeholder)
     address = Column(String, nullable=True)
 
     # note_peek
@@ -102,6 +102,28 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 
 # ------------------------------------------------
+# FLEXIBLE BIRTHDAY MODEL
+# ------------------------------------------------
+
+class BirthdayModel(BaseModel):
+    year: Optional[int] = None
+    month: int
+    day: int
+
+    @field_validator("month")
+    def validate_month(cls, v):
+        if not 1 <= v <= 12:
+            raise ValueError("Month must be between 1 and 12")
+        return v
+
+    @field_validator("day")
+    def validate_day(cls, v):
+        if not 1 <= v <= 31:
+            raise ValueError("Day must be between 1 and 31")
+        return v
+
+
+# ------------------------------------------------
 # SCHEMAS
 # ------------------------------------------------
 
@@ -110,7 +132,7 @@ class DataPeekUpdate(BaseModel):
     last_name: Optional[str] = None
     job_title: Optional[str] = None
     phone_number: Optional[str] = None
-    birthday: Optional[date] = None
+    birthday: Optional[BirthdayModel] = None   # flexible birthday input
     address: Optional[str] = None
 
 
@@ -133,7 +155,7 @@ class UserSnapshot(BaseModel):
     last_name: Optional[str]
     job_title: Optional[str]
     phone_number: Optional[str]
-    birthday: Optional[date]
+    birthday: Optional[BirthdayModel]    # output flexible birthday
     address: Optional[str]
     note_name: Optional[str]
     note_body: Optional[str]
@@ -176,6 +198,16 @@ def delete_screenshot_file(path: Optional[str]):
             p.unlink()
 
 
+def convert_db_birthday_to_model(db_date: Optional[date]):
+    if not db_date:
+        return None
+    return {
+        "year": db_date.year,
+        "month": db_date.month,
+        "day": db_date.day
+    }
+
+
 # ------------------------------------------------
 # GET SPLITS
 # ------------------------------------------------
@@ -190,7 +222,7 @@ def get_data_peek(user_id: str, db: Session = Depends(get_db)):
         "last_name": u.last_name,
         "job_title": u.job_title,
         "phone_number": u.phone_number,
-        "birthday": u.birthday,
+        "birthday": convert_db_birthday_to_model(u.birthday),
         "address": u.address
     }
 
@@ -246,7 +278,23 @@ def get_user(user_id: str, db: Session = Depends(get_db)):
     u = db.query(User).filter(User.id == user_id).first()
     if not u:
         raise HTTPException(404, "User not found")
-    return u
+
+    snapshot = UserSnapshot(
+        id=u.id,
+        first_name=u.first_name,
+        last_name=u.last_name,
+        job_title=u.job_title,
+        phone_number=u.phone_number,
+        birthday=convert_db_birthday_to_model(u.birthday),
+        address=u.address,
+        note_name=u.note_name,
+        note_body=u.note_body,
+        contact=u.contact,
+        screenshot_path=u.screenshot_path,
+        url=u.url,
+        command=u.command
+    )
+    return snapshot
 
 
 @app.delete("/user/{user_id}")
@@ -267,15 +315,28 @@ def delete_user(user_id: str, db: Session = Depends(get_db)):
 @app.post("/data_peek/{user_id}", response_model=UserSnapshot)
 def update_data_peek(user_id: str, update: DataPeekUpdate, db: Session = Depends(get_db)):
     u = get_or_create_user(db, user_id)
+    payload = update.dict(exclude_unset=True)
 
-    for field, value in update.dict(exclude_unset=True).items():
-        setattr(u, field, value)
+    # Handle flexible birthday
+    if "birthday" in payload:
+        b = payload["birthday"]
+        if b is None:
+            u.birthday = None
+        else:
+            year = b["year"] if b.get("year") is not None else 2000
+            u.birthday = date(year, b["month"], b["day"])
+
+    # Handle other fields
+    for field, value in payload.items():
+        if field != "birthday":
+            setattr(u, field, value)
 
     u.data_peek_updated_at = datetime.utcnow()
     db.add(u)
     db.commit()
     db.refresh(u)
-    return u
+
+    return get_user(user_id, db)
 
 
 @app.post("/note_peek/{user_id}", response_model=UserSnapshot)
@@ -289,7 +350,7 @@ def update_note_peek(user_id: str, update: NotePeekUpdate, db: Session = Depends
     db.add(u)
     db.commit()
     db.refresh(u)
-    return u
+    return get_user(user_id, db)
 
 
 @app.post("/screen_peek/{user_id}", response_model=UserSnapshot)
@@ -316,7 +377,7 @@ async def update_screen_peek(
     db.add(u)
     db.commit()
     db.refresh(u)
-    return u
+    return get_user(user_id, db)
 
 
 @app.get("/screen_peek/{user_id}/screenshot")
@@ -338,7 +399,7 @@ def update_command(user_id: str, update: CommandUpdate, db: Session = Depends(ge
     db.add(u)
     db.commit()
     db.refresh(u)
-    return u
+    return get_user(user_id, db)
 
 
 # ------------------------------------------------
