@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 from datetime import datetime, date
 from typing import Optional
 from sqlalchemy import create_engine, Column, String, Integer, Date, DateTime, Text, ForeignKey
@@ -36,7 +36,7 @@ class User(Base):
     last_name = Column(String, nullable=True)
     job_title = Column(String, nullable=True)
     phone_number = Column(String, nullable=True)
-    birthday = Column(Date, nullable=True)       # stored as full date (year may be placeholder)
+    birthday = Column(Date, nullable=True)
     address = Column(String, nullable=True)
 
     # note_peek
@@ -102,28 +102,6 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 
 # ------------------------------------------------
-# FLEXIBLE BIRTHDAY MODEL
-# ------------------------------------------------
-
-class BirthdayModel(BaseModel):
-    year: Optional[int] = None
-    month: int
-    day: int
-
-    @field_validator("month")
-    def validate_month(cls, v):
-        if not 1 <= v <= 12:
-            raise ValueError("Month must be between 1 and 12")
-        return v
-
-    @field_validator("day")
-    def validate_day(cls, v):
-        if not 1 <= v <= 31:
-            raise ValueError("Day must be between 1 and 31")
-        return v
-
-
-# ------------------------------------------------
 # SCHEMAS
 # ------------------------------------------------
 
@@ -132,7 +110,8 @@ class DataPeekUpdate(BaseModel):
     last_name: Optional[str] = None
     job_title: Optional[str] = None
     phone_number: Optional[str] = None
-    birthday: Optional[BirthdayModel] = None   # flexible birthday input
+    # birthday sent as a string (e.g. "2000-07-14", "07-14", "null", "")
+    birthday: Optional[str] = None
     address: Optional[str] = None
 
 
@@ -155,7 +134,8 @@ class UserSnapshot(BaseModel):
     last_name: Optional[str]
     job_title: Optional[str]
     phone_number: Optional[str]
-    birthday: Optional[BirthdayModel]    # output flexible birthday
+    # birthday returned as ISO string "YYYY-MM-DD" or None
+    birthday: Optional[str]
     address: Optional[str]
     note_name: Optional[str]
     note_body: Optional[str]
@@ -198,14 +178,52 @@ def delete_screenshot_file(path: Optional[str]):
             p.unlink()
 
 
-def convert_db_birthday_to_model(db_date: Optional[date]):
-    if not db_date:
+def parse_birthday_string(v: Optional[str]) -> Optional[date]:
+    """
+    Accepts a flexible birthday string and returns a date or None.
+
+    Supported:
+      - None, "null", ""     -> None
+      - "YYYY-MM-DD"         -> exact date
+      - "MM-DD" (e.g. 07-14) -> stored as 2000-MM-DD (placeholder year)
+    """
+    if v is None:
         return None
-    return {
-        "year": db_date.year,
-        "month": db_date.month,
-        "day": db_date.day
-    }
+
+    v = v.strip()
+    if not v:
+        return None
+
+    lower = v.lower()
+    if lower == "null":
+        return None
+
+    # Try full ISO format (YYYY-MM-DD)
+    try:
+        return date.fromisoformat(v)
+    except Exception:
+        pass
+
+    # Try MM-DD (your custom format from Shortcuts)
+    try:
+        parts = v.split("-")
+        if len(parts) == 2:
+            month = int(parts[0])
+            day = int(parts[1])
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                # Use placeholder year 2000 when no year is provided
+                return date(2000, month, day)
+    except Exception:
+        pass
+
+    # Unrecognized format -> ignore instead of error
+    return None
+
+
+def db_birthday_to_string(d: Optional[date]) -> Optional[str]:
+    if not d:
+        return None
+    return d.isoformat()  # "YYYY-MM-DD"
 
 
 # ------------------------------------------------
@@ -222,7 +240,7 @@ def get_data_peek(user_id: str, db: Session = Depends(get_db)):
         "last_name": u.last_name,
         "job_title": u.job_title,
         "phone_number": u.phone_number,
-        "birthday": convert_db_birthday_to_model(u.birthday),
+        "birthday": db_birthday_to_string(u.birthday),
         "address": u.address
     }
 
@@ -285,14 +303,14 @@ def get_user(user_id: str, db: Session = Depends(get_db)):
         last_name=u.last_name,
         job_title=u.job_title,
         phone_number=u.phone_number,
-        birthday=convert_db_birthday_to_model(u.birthday),
+        birthday=db_birthday_to_string(u.birthday),
         address=u.address,
         note_name=u.note_name,
         note_body=u.note_body,
         contact=u.contact,
         screenshot_path=u.screenshot_path,
         url=u.url,
-        command=u.command
+        command=u.command,
     )
     return snapshot
 
@@ -317,14 +335,9 @@ def update_data_peek(user_id: str, update: DataPeekUpdate, db: Session = Depends
     u = get_or_create_user(db, user_id)
     payload = update.dict(exclude_unset=True)
 
-    # Handle flexible birthday
+    # Handle birthday specially (string -> date)
     if "birthday" in payload:
-        b = payload["birthday"]
-        if b is None:
-            u.birthday = None
-        else:
-            year = b["year"] if b.get("year") is not None else 2000
-            u.birthday = date(year, b["month"], b["day"])
+        u.birthday = parse_birthday_string(payload["birthday"])
 
     # Handle other fields
     for field, value in payload.items():
@@ -335,7 +348,6 @@ def update_data_peek(user_id: str, update: DataPeekUpdate, db: Session = Depends
     db.add(u)
     db.commit()
     db.refresh(u)
-
     return get_user(user_id, db)
 
 
