@@ -4,7 +4,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import create_engine, Column, String, Integer, DateTime, Text
+from sqlalchemy import create_engine, Column, String, Integer, DateTime, Text, ForeignKey
 from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
 from pathlib import Path
 import shutil
