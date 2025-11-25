@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from datetime import datetime, date
+from datetime import datetime
 from typing import Optional
 from sqlalchemy import create_engine, Column, String, Integer, Date, DateTime, Text, ForeignKey
 from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 import json
 
+# Optional push import
 from push import send_push
 
 
@@ -36,7 +37,16 @@ class User(Base):
     last_name = Column(String, nullable=True)
     job_title = Column(String, nullable=True)
     phone_number = Column(String, nullable=True)
+
+    # OLD SQL DATE (ignored but kept to avoid breaking DB)
     birthday = Column(Date, nullable=True)
+
+    # NEW PARTIAL BIRTHDAY FIELDS
+    birthday_raw = Column(String, nullable=True)
+    birthday_year = Column(Integer, nullable=True)
+    birthday_month = Column(Integer, nullable=True)
+    birthday_day = Column(Integer, nullable=True)
+
     address = Column(String, nullable=True)
 
     # note_peek
@@ -59,7 +69,8 @@ class User(Base):
     screen_peek_updated_at = Column(DateTime, nullable=True)
     command_updated_at = Column(DateTime, nullable=True)
 
-    subscriptions = relationship("PushSubscription", back_populates="user", cascade="all, delete-orphan")
+    subscriptions = relationship("PushSubscription",
+                                 back_populates="user", cascade="all, delete-orphan")
 
 
 class PushSubscription(Base):
@@ -110,8 +121,10 @@ class DataPeekUpdate(BaseModel):
     last_name: Optional[str] = None
     job_title: Optional[str] = None
     phone_number: Optional[str] = None
-    # birthday sent as a string (e.g. "2000-07-14", "07-14", "null", "")
+
+    # birthday field stays a single string from Shortcut
     birthday: Optional[str] = None
+
     address: Optional[str] = None
 
 
@@ -134,8 +147,13 @@ class UserSnapshot(BaseModel):
     last_name: Optional[str]
     job_title: Optional[str]
     phone_number: Optional[str]
-    # birthday returned as ISO string "YYYY-MM-DD" or None
-    birthday: Optional[str]
+
+    # NEW PARTIAL BIRTHDAY FIELDS
+    birthday_raw: Optional[str]
+    birthday_year: Optional[int]
+    birthday_month: Optional[int]
+    birthday_day: Optional[int]
+
     address: Optional[str]
     note_name: Optional[str]
     note_body: Optional[str]
@@ -146,6 +164,56 @@ class UserSnapshot(BaseModel):
 
     class Config:
         orm_mode = True
+
+
+# ------------------------------------------------
+# BIRTHDAY PARSER
+# ------------------------------------------------
+
+def parse_partial_birthday(input_str: Optional[str]):
+    """
+    Accepts a string from Shortcuts and returns:
+        raw, year, month, day
+    """
+
+    if input_str is None:
+        return None, None, None, None
+
+    s = input_str.strip()
+    if s == "" or s.lower() == "null":
+        return None, None, None, None
+
+    # Try YYYY-MM-DD
+    parts = s.split("-")
+
+    # YYYY-MM-DD
+    if len(parts) == 3 and parts[0].isdigit():
+        year = int(parts[0])
+        month = int(parts[1]) if parts[1].isdigit() else None
+        day = int(parts[2]) if parts[2].isdigit() else None
+        return s, year, month, day
+
+    # MM-DD
+    if len(parts) == 2:
+        if parts[0].isdigit() and parts[1].isdigit():
+            month = int(parts[0])
+            day = int(parts[1])
+            return s, None, month, day
+
+    # YYYY
+    if s.isdigit() and len(s) == 4:
+        return s, int(s), None, None
+
+    # MM
+    if s.isdigit() and 1 <= int(s) <= 12:
+        return s, None, int(s), None
+
+    # DD
+    if s.isdigit() and 1 <= int(s) <= 31:
+        return s, None, None, int(s)
+
+    # Unknown pattern
+    return s, None, None, None
 
 
 # ------------------------------------------------
@@ -178,86 +246,37 @@ def delete_screenshot_file(path: Optional[str]):
             p.unlink()
 
 
-def parse_birthday_string(v: Optional[str]) -> Optional[date]:
-    """
-    Accepts a flexible birthday string and returns a date or None.
-
-    Supported:
-      - None, "null", ""     -> None
-      - "YYYY-MM-DD"         -> exact date
-      - "MM-DD" (e.g. 07-14) -> stored as 2000-MM-DD (placeholder year)
-    """
-    if v is None:
-        return None
-
-    v = v.strip()
-    if not v:
-        return None
-
-    lower = v.lower()
-    if lower == "null":
-        return None
-
-    # Try full ISO format (YYYY-MM-DD)
-    try:
-        return date.fromisoformat(v)
-    except Exception:
-        pass
-
-    # Try MM-DD (your custom format from Shortcuts)
-    try:
-        parts = v.split("-")
-        if len(parts) == 2:
-            month = int(parts[0])
-            day = int(parts[1])
-            if 1 <= month <= 12 and 1 <= day <= 31:
-                # Use placeholder year 2000 when no year is provided
-                return date(2000, month, day)
-    except Exception:
-        pass
-
-    # Unrecognized format -> ignore instead of error
-    return None
-
-
-def db_birthday_to_string(d: Optional[date]) -> Optional[str]:
-    if not d:
-        return None
-    return d.isoformat()  # "YYYY-MM-DD"
-
-
 # ------------------------------------------------
 # GET SPLITS
 # ------------------------------------------------
 
 @app.get("/data_peek/{user_id}")
 def get_data_peek(user_id: str, db: Session = Depends(get_db)):
-    u = db.query(User).filter(User.id == user_id).first()
-    if not u:
-        raise HTTPException(404, "User not found")
+    u = get_or_create_user(db, user_id)
     return {
         "first_name": u.first_name,
         "last_name": u.last_name,
         "job_title": u.job_title,
         "phone_number": u.phone_number,
-        "birthday": db_birthday_to_string(u.birthday),
+
+        "birthday_raw": u.birthday_raw,
+        "birthday_year": u.birthday_year,
+        "birthday_month": u.birthday_month,
+        "birthday_day": u.birthday_day,
+
         "address": u.address
     }
 
 
 @app.get("/note_peek/{user_id}")
 def get_note_peek(user_id: str, db: Session = Depends(get_db)):
-    u = db.query(User).filter(User.id == user_id).first()
-    if not u:
-        raise HTTPException(404, "User not found")
+    u = get_or_create_user(db, user_id)
     return {"note_name": u.note_name, "note_body": u.note_body}
 
 
 @app.get("/screen_peek/{user_id}")
 def get_screen_peek(user_id: str, db: Session = Depends(get_db)):
-    u = db.query(User).filter(User.id == user_id).first()
-    if not u:
-        raise HTTPException(404, "User not found")
+    u = get_or_create_user(db, user_id)
     return {
         "contact": u.contact,
         "url": u.url,
@@ -267,9 +286,7 @@ def get_screen_peek(user_id: str, db: Session = Depends(get_db)):
 
 @app.get("/commands/{user_id}")
 def get_commands(user_id: str, db: Session = Depends(get_db)):
-    u = db.query(User).filter(User.id == user_id).first()
-    if not u:
-        raise HTTPException(404, "User not found")
+    u = get_or_create_user(db, user_id)
     return {"command": u.command}
 
 
@@ -284,42 +301,22 @@ def subscribe_push(user_id: str, payload: SubscriptionModel, db: Session = Depen
     sub = PushSubscription(user_id=user.id, subscription_json=json.dumps(payload.subscription))
     db.add(sub)
     db.commit()
-    return {"status": "subscribed", "user_id": user.id}
+    return {"status": "subscribed", "user_id": user_id}
 
 
 # ------------------------------------------------
-# USER SNAPSHOT + DELETE
+# USER SNAPSHOT
 # ------------------------------------------------
 
 @app.get("/user/{user_id}", response_model=UserSnapshot)
 def get_user(user_id: str, db: Session = Depends(get_db)):
-    u = db.query(User).filter(User.id == user_id).first()
-    if not u:
-        raise HTTPException(404, "User not found")
-
-    snapshot = UserSnapshot(
-        id=u.id,
-        first_name=u.first_name,
-        last_name=u.last_name,
-        job_title=u.job_title,
-        phone_number=u.phone_number,
-        birthday=db_birthday_to_string(u.birthday),
-        address=u.address,
-        note_name=u.note_name,
-        note_body=u.note_body,
-        contact=u.contact,
-        screenshot_path=u.screenshot_path,
-        url=u.url,
-        command=u.command,
-    )
-    return snapshot
+    u = get_or_create_user(db, user_id)
+    return u
 
 
 @app.delete("/user/{user_id}")
 def delete_user(user_id: str, db: Session = Depends(get_db)):
-    u = db.query(User).filter(User.id == user_id).first()
-    if not u:
-        raise HTTPException(404, "User not found")
+    u = get_or_create_user(db, user_id)
     delete_screenshot_file(u.screenshot_path)
     db.delete(u)
     db.commit()
@@ -335,11 +332,15 @@ def update_data_peek(user_id: str, update: DataPeekUpdate, db: Session = Depends
     u = get_or_create_user(db, user_id)
     payload = update.dict(exclude_unset=True)
 
-    # Handle birthday specially (string -> date)
+    # Handle new full birthday parsing
     if "birthday" in payload:
-        u.birthday = parse_birthday_string(payload["birthday"])
+        raw, y, m, d = parse_partial_birthday(payload["birthday"])
+        u.birthday_raw = raw
+        u.birthday_year = y
+        u.birthday_month = m
+        u.birthday_day = d
 
-    # Handle other fields
+    # Other fields
     for field, value in payload.items():
         if field != "birthday":
             setattr(u, field, value)
@@ -348,21 +349,17 @@ def update_data_peek(user_id: str, update: DataPeekUpdate, db: Session = Depends
     db.add(u)
     db.commit()
     db.refresh(u)
-    return get_user(user_id, db)
+    return u
 
 
 @app.post("/note_peek/{user_id}", response_model=UserSnapshot)
 def update_note_peek(user_id: str, update: NotePeekUpdate, db: Session = Depends(get_db)):
     u = get_or_create_user(db, user_id)
-
     for field, value in update.dict(exclude_unset=True).items():
         setattr(u, field, value)
-
     u.note_peek_updated_at = datetime.utcnow()
-    db.add(u)
     db.commit()
-    db.refresh(u)
-    return get_user(user_id, db)
+    return u
 
 
 @app.post("/screen_peek/{user_id}", response_model=UserSnapshot)
@@ -389,17 +386,17 @@ async def update_screen_peek(
     db.add(u)
     db.commit()
     db.refresh(u)
-    return get_user(user_id, db)
+    return u
 
 
 @app.get("/screen_peek/{user_id}/screenshot")
 def get_screen_peek_screenshot(user_id: str, db: Session = Depends(get_db)):
-    u = db.query(User).filter(User.id == user_id).first()
+    u = get_or_create_user(db, user_id)
     if not u or not u.screenshot_path:
         raise HTTPException(404, "Screenshot not found")
     path = Path(u.screenshot_path)
     if not path.exists():
-        raise HTTPException(404, "Screenshot file missing")
+        raise HTTPException(404, "File missing")
     return FileResponse(path)
 
 
@@ -408,10 +405,8 @@ def update_command(user_id: str, update: CommandUpdate, db: Session = Depends(ge
     u = get_or_create_user(db, user_id)
     u.command = update.command
     u.command_updated_at = datetime.utcnow()
-    db.add(u)
     db.commit()
-    db.refresh(u)
-    return get_user(user_id, db)
+    return u
 
 
 # ------------------------------------------------
@@ -421,14 +416,20 @@ def update_command(user_id: str, update: CommandUpdate, db: Session = Depends(ge
 @app.post("/data_peek/{user_id}/clear")
 def clear_data_peek(user_id: str, db: Session = Depends(get_db)):
     u = get_or_create_user(db, user_id)
+
     u.first_name = None
     u.last_name = None
     u.job_title = None
     u.phone_number = None
-    u.birthday = None
     u.address = None
+
+    # Clear new birthday fields
+    u.birthday_raw = None
+    u.birthday_year = None
+    u.birthday_month = None
+    u.birthday_day = None
+
     u.data_peek_updated_at = datetime.utcnow()
-    db.add(u)
     db.commit()
     return {"status": "data_peek_cleared", "user_id": user_id}
 
@@ -439,7 +440,6 @@ def clear_note_peek(user_id: str, db: Session = Depends(get_db)):
     u.note_name = None
     u.note_body = None
     u.note_peek_updated_at = datetime.utcnow()
-    db.add(u)
     db.commit()
     return {"status": "note_peek_cleared", "user_id": user_id}
 
@@ -452,7 +452,6 @@ def clear_screen_peek(user_id: str, db: Session = Depends(get_db)):
     u.contact = None
     u.url = None
     u.screen_peek_updated_at = datetime.utcnow()
-    db.add(u)
     db.commit()
     return {"status": "screen_peek_cleared", "user_id": user_id}
 
@@ -462,7 +461,6 @@ def clear_commands(user_id: str, db: Session = Depends(get_db)):
     u = get_or_create_user(db, user_id)
     u.command = None
     u.command_updated_at = datetime.utcnow()
-    db.add(u)
     db.commit()
     return {"status": "commands_cleared", "user_id": user_id}
 
@@ -471,35 +469,33 @@ def clear_commands(user_id: str, db: Session = Depends(get_db)):
 def clear_all(user_id: str, db: Session = Depends(get_db)):
     u = get_or_create_user(db, user_id)
 
-    # Clear data_peek
     u.first_name = None
     u.last_name = None
     u.job_title = None
     u.phone_number = None
-    u.birthday = None
     u.address = None
 
-    # Clear note_peek
+    u.birthday_raw = None
+    u.birthday_year = None
+    u.birthday_month = None
+    u.birthday_day = None
+
     u.note_name = None
     u.note_body = None
 
-    # Clear screen_peek
     delete_screenshot_file(u.screenshot_path)
     u.screenshot_path = None
     u.contact = None
     u.url = None
 
-    # Clear commands
     u.command = None
 
-    # Update timestamps
     now = datetime.utcnow()
     u.data_peek_updated_at = now
     u.note_peek_updated_at = now
     u.screen_peek_updated_at = now
     u.command_updated_at = now
 
-    db.add(u)
     db.commit()
     return {"status": "all_cleared", "user_id": user_id}
 
