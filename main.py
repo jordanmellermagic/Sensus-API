@@ -10,9 +10,6 @@ from pathlib import Path
 import shutil
 import json
 
-# Optional push import
-from push import send_push
-
 
 # ------------------------------------------------
 # DATABASE SETUP
@@ -32,63 +29,39 @@ class User(Base):
 
     id = Column(String, primary_key=True, index=True)
 
-    # data_peek
+    # User fields
     first_name = Column(String, nullable=True)
     last_name = Column(String, nullable=True)
     job_title = Column(String, nullable=True)
     phone_number = Column(String, nullable=True)
 
-    # OLD SQL DATE (ignored but kept to avoid breaking DB)
-    birthday = Column(Date, nullable=True)
+    # OLD SQL DATE (ignored but left to avoid breaking DB)
+    birthday_old = Column("birthday", Date, nullable=True)
 
-    # NEW PARTIAL BIRTHDAY FIELDS
-    birthday_raw = Column(String, nullable=True)
+    # NEW partial birthday fields (NOT exposed in API)
+    birthday = Column(String, nullable=True)  # exposed to client
     birthday_year = Column(Integer, nullable=True)
     birthday_month = Column(Integer, nullable=True)
     birthday_day = Column(Integer, nullable=True)
 
     address = Column(String, nullable=True)
 
-    # note_peek
     note_name = Column(Text, nullable=True)
     note_body = Column(Text, nullable=True)
 
-    # screen_peek
     contact = Column(String, nullable=True)
     screenshot_path = Column(String, nullable=True)
     url = Column(Text, nullable=True)
 
-    # commands
     command = Column(Text, nullable=True)
 
-    # timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
     data_peek_updated_at = Column(DateTime, nullable=True)
     note_peek_updated_at = Column(DateTime, nullable=True)
     screen_peek_updated_at = Column(DateTime, nullable=True)
     command_updated_at = Column(DateTime, nullable=True)
-
-    subscriptions = relationship("PushSubscription",
-                                 back_populates="user", cascade="all, delete-orphan")
-
-
-class PushSubscription(Base):
-    __tablename__ = "push_subscriptions"
-
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"))
-    subscription_json = Column(Text, nullable=False)
-
-    user = relationship("User", back_populates="subscriptions")
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 
 Base.metadata.create_all(bind=engine)
@@ -121,10 +94,7 @@ class DataPeekUpdate(BaseModel):
     last_name: Optional[str] = None
     job_title: Optional[str] = None
     phone_number: Optional[str] = None
-
-    # birthday field stays a single string from Shortcut
-    birthday: Optional[str] = None
-
+    birthday: Optional[str] = None   # Only one field from Shortcut
     address: Optional[str] = None
 
 
@@ -137,10 +107,6 @@ class CommandUpdate(BaseModel):
     command: Optional[str] = None
 
 
-class SubscriptionModel(BaseModel):
-    subscription: dict
-
-
 class UserSnapshot(BaseModel):
     id: str
     first_name: Optional[str]
@@ -148,11 +114,8 @@ class UserSnapshot(BaseModel):
     job_title: Optional[str]
     phone_number: Optional[str]
 
-    # NEW PARTIAL BIRTHDAY FIELDS
-    birthday_raw: Optional[str]
-    birthday_year: Optional[int]
-    birthday_month: Optional[int]
-    birthday_day: Optional[int]
+    # Only birthday string exposed
+    birthday: Optional[str]
 
     address: Optional[str]
     note_name: Optional[str]
@@ -172,18 +135,17 @@ class UserSnapshot(BaseModel):
 
 def parse_partial_birthday(input_str: Optional[str]):
     """
-    Accepts a string from Shortcuts and returns:
-        raw, year, month, day
+    Accepts a string from Shortcuts.
+    Returns: raw_string, year, month, day
     """
-
     if input_str is None:
         return None, None, None, None
 
     s = input_str.strip()
+
     if s == "" or s.lower() == "null":
         return None, None, None, None
 
-    # Try YYYY-MM-DD
     parts = s.split("-")
 
     # YYYY-MM-DD
@@ -194,25 +156,21 @@ def parse_partial_birthday(input_str: Optional[str]):
         return s, year, month, day
 
     # MM-DD
-    if len(parts) == 2:
-        if parts[0].isdigit() and parts[1].isdigit():
-            month = int(parts[0])
-            day = int(parts[1])
-            return s, None, month, day
+    if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+        return s, None, int(parts[0]), int(parts[1])
 
     # YYYY
     if s.isdigit() and len(s) == 4:
         return s, int(s), None, None
 
-    # MM
+    # MM only
     if s.isdigit() and 1 <= int(s) <= 12:
         return s, None, int(s), None
 
-    # DD
+    # DD only
     if s.isdigit() and 1 <= int(s) <= 31:
         return s, None, None, int(s)
 
-    # Unknown pattern
     return s, None, None, None
 
 
@@ -247,7 +205,7 @@ def delete_screenshot_file(path: Optional[str]):
 
 
 # ------------------------------------------------
-# GET SPLITS
+# GET ROUTES
 # ------------------------------------------------
 
 @app.get("/data_peek/{user_id}")
@@ -258,12 +216,7 @@ def get_data_peek(user_id: str, db: Session = Depends(get_db)):
         "last_name": u.last_name,
         "job_title": u.job_title,
         "phone_number": u.phone_number,
-
-        "birthday_raw": u.birthday_raw,
-        "birthday_year": u.birthday_year,
-        "birthday_month": u.birthday_month,
-        "birthday_day": u.birthday_day,
-
+        "birthday": u.birthday,   # ONLY THIS ONE
         "address": u.address
     }
 
@@ -291,27 +244,12 @@ def get_commands(user_id: str, db: Session = Depends(get_db)):
 
 
 # ------------------------------------------------
-# PUSH SUBSCRIPTIONS
-# ------------------------------------------------
-
-@app.post("/push/subscribe/{user_id}")
-def subscribe_push(user_id: str, payload: SubscriptionModel, db: Session = Depends(get_db)):
-    user = get_or_create_user(db, user_id)
-    db.query(PushSubscription).filter(PushSubscription.user_id == user.id).delete()
-    sub = PushSubscription(user_id=user.id, subscription_json=json.dumps(payload.subscription))
-    db.add(sub)
-    db.commit()
-    return {"status": "subscribed", "user_id": user_id}
-
-
-# ------------------------------------------------
 # USER SNAPSHOT
 # ------------------------------------------------
 
 @app.get("/user/{user_id}", response_model=UserSnapshot)
 def get_user(user_id: str, db: Session = Depends(get_db)):
-    u = get_or_create_user(db, user_id)
-    return u
+    return get_or_create_user(db, user_id)
 
 
 @app.delete("/user/{user_id}")
@@ -332,10 +270,10 @@ def update_data_peek(user_id: str, update: DataPeekUpdate, db: Session = Depends
     u = get_or_create_user(db, user_id)
     payload = update.dict(exclude_unset=True)
 
-    # Handle new full birthday parsing
+    # Birthday parsing
     if "birthday" in payload:
         raw, y, m, d = parse_partial_birthday(payload["birthday"])
-        u.birthday_raw = raw
+        u.birthday = raw
         u.birthday_year = y
         u.birthday_month = m
         u.birthday_day = d
@@ -346,7 +284,6 @@ def update_data_peek(user_id: str, update: DataPeekUpdate, db: Session = Depends
             setattr(u, field, value)
 
     u.data_peek_updated_at = datetime.utcnow()
-    db.add(u)
     db.commit()
     db.refresh(u)
     return u
@@ -359,6 +296,7 @@ def update_note_peek(user_id: str, update: NotePeekUpdate, db: Session = Depends
         setattr(u, field, value)
     u.note_peek_updated_at = datetime.utcnow()
     db.commit()
+    db.refresh(u)
     return u
 
 
@@ -372,7 +310,7 @@ async def update_screen_peek(
 ):
     u = get_or_create_user(db, user_id)
 
-    if screenshot is not None:
+    if screenshot:
         delete_screenshot_file(u.screenshot_path)
         u.screenshot_path = save_screenshot_file(user_id, screenshot)
 
@@ -383,20 +321,19 @@ async def update_screen_peek(
         u.url = url
 
     u.screen_peek_updated_at = datetime.utcnow()
-    db.add(u)
     db.commit()
     db.refresh(u)
     return u
 
 
 @app.get("/screen_peek/{user_id}/screenshot")
-def get_screen_peek_screenshot(user_id: str, db: Session = Depends(get_db)):
+def get_screenshot(user_id: str, db: Session = Depends(get_db)):
     u = get_or_create_user(db, user_id)
-    if not u or not u.screenshot_path:
+    if not u.screenshot_path:
         raise HTTPException(404, "Screenshot not found")
     path = Path(u.screenshot_path)
     if not path.exists():
-        raise HTTPException(404, "File missing")
+        raise HTTPException(404, "Missing screenshot file")
     return FileResponse(path)
 
 
@@ -406,6 +343,7 @@ def update_command(user_id: str, update: CommandUpdate, db: Session = Depends(ge
     u.command = update.command
     u.command_updated_at = datetime.utcnow()
     db.commit()
+    db.refresh(u)
     return u
 
 
@@ -414,7 +352,7 @@ def update_command(user_id: str, update: CommandUpdate, db: Session = Depends(ge
 # ------------------------------------------------
 
 @app.post("/data_peek/{user_id}/clear")
-def clear_data_peek(user_id: str, db: Session = Depends(get_db)):
+def clear_data(user_id: str, db: Session = Depends(get_db)):
     u = get_or_create_user(db, user_id)
 
     u.first_name = None
@@ -423,19 +361,19 @@ def clear_data_peek(user_id: str, db: Session = Depends(get_db)):
     u.phone_number = None
     u.address = None
 
-    # Clear new birthday fields
-    u.birthday_raw = None
+    u.birthday = None
     u.birthday_year = None
     u.birthday_month = None
     u.birthday_day = None
 
     u.data_peek_updated_at = datetime.utcnow()
     db.commit()
+
     return {"status": "data_peek_cleared", "user_id": user_id}
 
 
 @app.post("/note_peek/{user_id}/clear")
-def clear_note_peek(user_id: str, db: Session = Depends(get_db)):
+def clear_notes(user_id: str, db: Session = Depends(get_db)):
     u = get_or_create_user(db, user_id)
     u.note_name = None
     u.note_body = None
@@ -445,7 +383,7 @@ def clear_note_peek(user_id: str, db: Session = Depends(get_db)):
 
 
 @app.post("/screen_peek/{user_id}/clear")
-def clear_screen_peek(user_id: str, db: Session = Depends(get_db)):
+def clear_screen(user_id: str, db: Session = Depends(get_db)):
     u = get_or_create_user(db, user_id)
     delete_screenshot_file(u.screenshot_path)
     u.screenshot_path = None
@@ -473,13 +411,13 @@ def clear_all(user_id: str, db: Session = Depends(get_db)):
     u.last_name = None
     u.job_title = None
     u.phone_number = None
-    u.address = None
 
-    u.birthday_raw = None
+    u.birthday = None
     u.birthday_year = None
     u.birthday_month = None
     u.birthday_day = None
 
+    u.address = None
     u.note_name = None
     u.note_body = None
 
