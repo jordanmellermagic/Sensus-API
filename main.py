@@ -1,6 +1,5 @@
 import os
 import shutil
-import uuid
 import calendar
 from datetime import datetime
 from typing import Optional
@@ -43,7 +42,8 @@ def get_db():
         db.close()
 
 
-ADMIN_KEY = os.getenv("ADMIN_KEY")   # only used for create_user
+# Admin key from environment
+ADMIN_KEY = os.getenv("ADMIN_KEY")
 
 
 # ---------------------------------------------------------
@@ -54,7 +54,7 @@ class User(Base):
     __tablename__ = "users"
 
     user_id = Column(String, primary_key=True)
-    password = Column(String, nullable=True)           # plain text
+    password = Column(String, nullable=True)
 
     # data_peek
     first_name = Column(String, nullable=True)
@@ -65,7 +65,6 @@ class User(Base):
     birthday_month = Column(Integer, nullable=True)
     birthday_day = Column(Integer, nullable=True)
     address = Column(String, nullable=True)
-
     data_peek_updated_at = Column(DateTime, default=datetime.utcnow)
 
     # note_peek
@@ -143,17 +142,13 @@ def delete_screenshot(path):
 def parse_birthday(raw: str):
     try:
         parts = raw.split("-")
-
         if len(parts) == 3:
             y, m, d = map(int, parts)
             return y, m, d
-
         if len(parts) == 2:
             m, d = map(int, parts)
             return None, m, d
-
         raise ValueError()
-
     except:
         raise HTTPException(status_code=400, detail="Invalid birthday format")
 
@@ -173,13 +168,20 @@ def format_birthday(user):
 
 app = FastAPI()
 
+# Full CORS support for your app
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],    # Your app uses cross-origin fetch
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 🔥 REQUIRED FOR SAFARI, IOS, CHROME, AND YOUR APP
+@app.options("/{full_path:path}")
+async def preflight(full_path: str):
+    return {}
+
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -191,7 +193,7 @@ def root():
 
 
 # ---------------------------------------------------------
-# ADMIN: CREATE USER (NO AUTH FOR USERS, ONLY ADMIN KEY)
+# ADMIN: CREATE USER
 # ---------------------------------------------------------
 
 @app.post("/auth/create_user")
@@ -202,7 +204,7 @@ def create_user(admin_key: str, payload: CreateUserRequest, db=Depends(get_db)):
     if admin_key != ADMIN_KEY:
         raise HTTPException(status_code=403, detail="Invalid admin key")
 
-    # if user exists → update password
+    # Update if exists
     existing = db.query(User).filter(User.user_id == payload.user_id).first()
     if existing:
         existing.password = payload.password
@@ -213,7 +215,7 @@ def create_user(admin_key: str, payload: CreateUserRequest, db=Depends(get_db)):
             "password": payload.password
         }
 
-    # new user
+    # Create new
     user = User(
         user_id=payload.user_id,
         password=payload.password
@@ -230,15 +232,11 @@ def create_user(admin_key: str, payload: CreateUserRequest, db=Depends(get_db)):
 
 
 # ---------------------------------------------------------
-# USER PASSWORD CHANGE
+# USER PASSWORD CHANGE (Also used for login verification)
 # ---------------------------------------------------------
 
 @app.post("/user/{user_id}/change_password")
-def change_password(
-    user_id: str,
-    payload: ChangePasswordRequest,
-    db=Depends(get_db)
-):
+def change_password(user_id: str, payload: ChangePasswordRequest, db=Depends(get_db)):
     user = db.query(User).filter(User.user_id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -293,7 +291,6 @@ def update_data_peek(user_id: str, payload: DataPeekUpdate, db=Depends(get_db)):
 @app.post("/data_peek/{user_id}/clear")
 def clear_data_peek(user_id: str, db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
-
     user.first_name = None
     user.last_name = None
     user.phone_number = None
@@ -302,7 +299,6 @@ def clear_data_peek(user_id: str, db=Depends(get_db)):
     user.birthday_month = None
     user.birthday_day = None
     user.address = None
-
     db.commit()
     return {"status": "cleared"}
 
@@ -333,10 +329,8 @@ def update_note_peek(user_id: str, payload: NotePeekUpdate, db=Depends(get_db)):
 @app.post("/note_peek/{user_id}/clear")
 def clear_note_peek(user_id: str, db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
-
     user.note_name = None
     user.note_body = None
-
     db.commit()
     return {"status": "cleared"}
 
@@ -358,10 +352,8 @@ def get_screen_peek(user_id: str, db=Depends(get_db)):
 @app.get("/screen_peek/{user_id}/screenshot")
 def download_screenshot(user_id: str, db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
-
     if not user.screenshot_path or not os.path.exists(user.screenshot_path):
         raise HTTPException(status_code=404, detail="No screenshot found")
-
     return FileResponse(user.screenshot_path)
 
 
@@ -422,21 +414,17 @@ def get_commands(user_id: str, db=Depends(get_db)):
 @app.post("/commands/{user_id}")
 def update_commands(user_id: str, payload: CommandUpdate, db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
-
     user.command = payload.command
     user.command_updated_at = datetime.utcnow()
     db.commit()
-
     return {"status": "updated"}
 
 
 @app.post("/commands/{user_id}/clear")
 def clear_commands(user_id: str, db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
-
     user.command = None
     db.commit()
-
     return {"status": "cleared"}
 
 
@@ -448,9 +436,9 @@ def clear_commands(user_id: str, db=Depends(get_db)):
 def clear_all(user_id: str, db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
 
-    # wipe fields
+    # Wipe fields
     user.first_name = None
-    user.last_id = None
+    user.last_name = None
     user.phone_number = None
     user.birthday = None
     user.birthday_year = None
