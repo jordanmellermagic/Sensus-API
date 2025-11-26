@@ -12,7 +12,6 @@ from fastapi import (
     File,
     Form,
     Depends,
-    Header
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -44,7 +43,7 @@ def get_db():
         db.close()
 
 
-ADMIN_KEY = os.getenv("ADMIN_KEY")
+ADMIN_KEY = os.getenv("ADMIN_KEY")   # only used for create_user
 
 
 # ---------------------------------------------------------
@@ -55,7 +54,7 @@ class User(Base):
     __tablename__ = "users"
 
     user_id = Column(String, primary_key=True)
-    auth_token = Column(String, nullable=True)
+    password = Column(String, nullable=True)           # plain text
 
     # data_peek
     first_name = Column(String, nullable=True)
@@ -95,31 +94,14 @@ Base.metadata.create_all(bind=engine)
 # SCHEMAS
 # ---------------------------------------------------------
 
-class UserSnapshot(BaseModel):
-    user_id: str
-    first_name: Optional[str]
-    last_name: Optional[str]
-    phone_number: Optional[str]
-    birthday: Optional[str]
-    address: Optional[str]
-
-    note_name: Optional[str]
-    note_body: Optional[str]
-
-    contact: Optional[str]
-    screenshot_path: Optional[str]
-    url: Optional[str]
-
-    command: Optional[str]
-
-
 class CreateUserRequest(BaseModel):
     user_id: str
+    password: str
 
 
-class LoginRequest(BaseModel):
-    user_id: str
-    token: str
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
 
 
 class DataPeekUpdate(BaseModel):
@@ -146,40 +128,37 @@ class CommandUpdate(BaseModel):
 def get_or_create_user(db, user_id: str):
     user = db.query(User).filter(User.user_id == user_id).first()
     if not user:
-        user = User(
-            user_id=user_id,
-            auth_token=str(uuid.uuid4())
-        )
+        user = User(user_id=user_id, password=None)
         db.add(user)
         db.commit()
         db.refresh(user)
     return user
 
 
-def delete_screenshot(path: Optional[str]):
+def delete_screenshot(path):
     if path and os.path.exists(path):
         os.remove(path)
 
 
-def parse_partial_birthday(raw: str):
+def parse_birthday(raw: str):
     try:
         parts = raw.split("-")
 
-        if len(parts) == 3:  # YYYY-MM-DD
+        if len(parts) == 3:
             y, m, d = map(int, parts)
             return y, m, d
 
-        if len(parts) == 2:  # MM-DD
+        if len(parts) == 2:
             m, d = map(int, parts)
             return None, m, d
 
         raise ValueError()
 
-    except Exception:
+    except:
         raise HTTPException(status_code=400, detail="Invalid birthday format")
 
 
-def format_birthday_for_output(user):
+def format_birthday(user):
     if user.birthday_month and user.birthday_day:
         month_name = calendar.month_abbr[user.birthday_month]
         if user.birthday_year:
@@ -189,31 +168,7 @@ def format_birthday_for_output(user):
 
 
 # ---------------------------------------------------------
-# TOKEN VERIFICATION
-# ---------------------------------------------------------
-
-def verify_token(
-    user_id: str,
-    authorization: str = Header(None, alias="Authorization"),
-    db=Depends(get_db)
-):
-    if authorization is None or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid token")
-
-    token = authorization.split("Bearer ")[1].strip()
-    user = db.query(User).filter(User.user_id == user_id).first()
-
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    if token != user.auth_token:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    return user
-
-
-# ---------------------------------------------------------
-# FASTAPI
+# FASTAPI SETUP
 # ---------------------------------------------------------
 
 app = FastAPI()
@@ -223,7 +178,7 @@ app.add_middleware(
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*", "Authorization"],
+    allow_headers=["*"],
 )
 
 UPLOAD_DIR = "uploads"
@@ -236,72 +191,65 @@ def root():
 
 
 # ---------------------------------------------------------
-# ADMIN: CREATE USER — NO HEADERS NEEDED
+# ADMIN: CREATE USER (NO AUTH FOR USERS, ONLY ADMIN KEY)
 # ---------------------------------------------------------
 
-@app.post("/auth/create_user_direct")
-def create_user_direct(
-    admin_key: str,
-    payload: CreateUserRequest,
-    db=Depends(get_db)
-):
+@app.post("/auth/create_user")
+def create_user(admin_key: str, payload: CreateUserRequest, db=Depends(get_db)):
     if ADMIN_KEY is None:
         raise HTTPException(status_code=500, detail="ADMIN_KEY not set")
 
     if admin_key != ADMIN_KEY:
         raise HTTPException(status_code=403, detail="Invalid admin key")
 
+    # if user exists → update password
     existing = db.query(User).filter(User.user_id == payload.user_id).first()
     if existing:
-        existing.auth_token = str(uuid.uuid4())
+        existing.password = payload.password
         db.commit()
-        return {"user_id": payload.user_id, "token": existing.auth_token}
+        return {
+            "status": "updated",
+            "user_id": payload.user_id,
+            "password": payload.password
+        }
 
+    # new user
     user = User(
         user_id=payload.user_id,
-        auth_token=str(uuid.uuid4())
+        password=payload.password
     )
     db.add(user)
     db.commit()
     db.refresh(user)
 
-    return {"user_id": payload.user_id, "token": user.auth_token}
+    return {
+        "status": "created",
+        "user_id": payload.user_id,
+        "password": payload.password
+    }
 
 
 # ---------------------------------------------------------
-# USER LOGIN
+# USER PASSWORD CHANGE
 # ---------------------------------------------------------
 
-@app.post("/auth/login")
-def login(payload: LoginRequest, db=Depends(get_db)):
-    user = db.query(User).filter(User.user_id == payload.user_id).first()
-    if not user or payload.token != user.auth_token:
-        raise HTTPException(status_code=401, detail="Invalid login")
-    return {"status": "login_success"}
+@app.post("/user/{user_id}/change_password")
+def change_password(
+    user_id: str,
+    payload: ChangePasswordRequest,
+    db=Depends(get_db)
+):
+    user = db.query(User).filter(User.user_id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
 
+    if user.password != payload.old_password:
+        raise HTTPException(status_code=403, detail="Old password incorrect")
 
-# ---------------------------------------------------------
-# USER SNAPSHOT
-# ---------------------------------------------------------
+    user.password = payload.new_password
+    db.commit()
 
-@app.get("/user/{user_id}", response_model=UserSnapshot)
-def get_user_snapshot(user_id: str, db=Depends(get_db), user=Depends(verify_token)):
-    user = get_or_create_user(db, user_id)
-
-    return UserSnapshot(
-        user_id=user.user_id,
-        first_name=user.first_name,
-        last_name=user.last_name,
-        phone_number=user.phone_number,
-        birthday=format_birthday_for_output(user),
-        address=user.address,
-        note_name=user.note_name,
-        note_body=user.note_body,
-        contact=user.contact,
-        screenshot_path=user.screenshot_path,
-        url=user.url,
-        command=user.command,
-    )
+    return {"status": "password_changed"}
 
 
 # ---------------------------------------------------------
@@ -309,29 +257,23 @@ def get_user_snapshot(user_id: str, db=Depends(get_db), user=Depends(verify_toke
 # ---------------------------------------------------------
 
 @app.get("/data_peek/{user_id}")
-def get_data_peek(user_id: str, user=Depends(verify_token), db=Depends(get_db)):
+def get_data_peek(user_id: str, db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
-
     return {
         "first_name": user.first_name,
         "last_name": user.last_name,
         "phone_number": user.phone_number,
-        "birthday": format_birthday_for_output(user),
+        "birthday": format_birthday(user),
         "address": user.address
     }
 
 
 @app.post("/data_peek/{user_id}")
-def update_data_peek(
-    user_id: str,
-    payload: DataPeekUpdate,
-    user_token=Depends(verify_token),
-    db=Depends(get_db)
-):
+def update_data_peek(user_id: str, payload: DataPeekUpdate, db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
 
     if payload.birthday:
-        y, m, d = parse_partial_birthday(payload.birthday)
+        y, m, d = parse_birthday(payload.birthday)
         user.birthday = payload.birthday
         user.birthday_year = y
         user.birthday_month = m
@@ -349,7 +291,7 @@ def update_data_peek(
 
 
 @app.post("/data_peek/{user_id}/clear")
-def clear_data_peek(user_id: str, user_token=Depends(verify_token), db=Depends(get_db)):
+def clear_data_peek(user_id: str, db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
 
     user.first_name = None
@@ -361,9 +303,7 @@ def clear_data_peek(user_id: str, user_token=Depends(verify_token), db=Depends(g
     user.birthday_day = None
     user.address = None
 
-    user.data_peek_updated_at = datetime.utcnow()
     db.commit()
-
     return {"status": "cleared"}
 
 
@@ -372,21 +312,13 @@ def clear_data_peek(user_id: str, user_token=Depends(verify_token), db=Depends(g
 # ---------------------------------------------------------
 
 @app.get("/note_peek/{user_id}")
-def get_note_peek(user_id: str, user=Depends(verify_token), db=Depends(get_db)):
+def get_note_peek(user_id: str, db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
-    return {
-        "note_name": user.note_name,
-        "note_body": user.note_body
-    }
+    return {"note_name": user.note_name, "note_body": user.note_body}
 
 
 @app.post("/note_peek/{user_id}")
-def update_note_peek(
-    user_id: str,
-    payload: NotePeekUpdate,
-    user_token=Depends(verify_token),
-    db=Depends(get_db)
-):
+def update_note_peek(user_id: str, payload: NotePeekUpdate, db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
 
     if payload.note_name is not None:
@@ -394,21 +326,18 @@ def update_note_peek(
     if payload.note_body is not None:
         user.note_body = payload.note_body
 
-    user.note_peek_updated_at = datetime.utcnow()
     db.commit()
-
     return {"status": "updated"}
 
 
 @app.post("/note_peek/{user_id}/clear")
-def clear_note_peek(user_id: str, user_token=Depends(verify_token), db=Depends(get_db)):
+def clear_note_peek(user_id: str, db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
 
     user.note_name = None
     user.note_body = None
-    user.note_peek_updated_at = datetime.utcnow()
-    db.commit()
 
+    db.commit()
     return {"status": "cleared"}
 
 
@@ -417,9 +346,8 @@ def clear_note_peek(user_id: str, user_token=Depends(verify_token), db=Depends(g
 # ---------------------------------------------------------
 
 @app.get("/screen_peek/{user_id}")
-def get_screen_peek(user_id: str, user=Depends(verify_token), db=Depends(get_db)):
+def get_screen_peek(user_id: str, db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
-
     return {
         "contact": user.contact,
         "url": user.url,
@@ -428,7 +356,7 @@ def get_screen_peek(user_id: str, user=Depends(verify_token), db=Depends(get_db)
 
 
 @app.get("/screen_peek/{user_id}/screenshot")
-def download_screenshot(user_id: str, user=Depends(verify_token), db=Depends(get_db)):
+def download_screenshot(user_id: str, db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
 
     if not user.screenshot_path or not os.path.exists(user.screenshot_path):
@@ -443,7 +371,6 @@ async def update_screen_peek(
     screenshot: UploadFile = File(None),
     contact: Optional[str] = Form(None),
     url: Optional[str] = Form(None),
-    user_token=Depends(verify_token),
     db=Depends(get_db)
 ):
     user = get_or_create_user(db, user_id)
@@ -453,37 +380,32 @@ async def update_screen_peek(
             delete_screenshot(user.screenshot_path)
 
         ext = os.path.splitext(screenshot.filename)[1]
-        file_path = os.path.join(UPLOAD_DIR, f"{user_id}{ext}")
+        path = os.path.join(UPLOAD_DIR, f"{user_id}{ext}")
 
-        with open(file_path, "wb") as f:
+        with open(path, "wb") as f:
             f.write(await screenshot.read())
 
-        user.screenshot_path = file_path
+        user.screenshot_path = path
 
     if contact is not None:
         user.contact = contact
     if url is not None:
         user.url = url
 
-    user.screen_peek_updated_at = datetime.utcnow()
     db.commit()
-
     return {"status": "updated"}
 
 
 @app.post("/screen_peek/{user_id}/clear")
-def clear_screen_peek(user_id: str, user_token=Depends(verify_token), db=Depends(get_db)):
+def clear_screen_peek(user_id: str, db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
 
     delete_screenshot(user.screenshot_path)
-
     user.contact = None
     user.url = None
     user.screenshot_path = None
 
-    user.screen_peek_updated_at = datetime.utcnow()
     db.commit()
-
     return {"status": "cleared"}
 
 
@@ -492,18 +414,13 @@ def clear_screen_peek(user_id: str, user_token=Depends(verify_token), db=Depends
 # ---------------------------------------------------------
 
 @app.get("/commands/{user_id}")
-def get_commands(user_id: str, user=Depends(verify_token), db=Depends(get_db)):
+def get_commands(user_id: str, db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
     return {"command": user.command}
 
 
 @app.post("/commands/{user_id}")
-def update_commands(
-    user_id: str,
-    payload: CommandUpdate,
-    user_token=Depends(verify_token),
-    db=Depends(get_db)
-):
+def update_commands(user_id: str, payload: CommandUpdate, db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
 
     user.command = payload.command
@@ -514,27 +431,26 @@ def update_commands(
 
 
 @app.post("/commands/{user_id}/clear")
-def clear_commands(user_id: str, user_token=Depends(verify_token), db=Depends(get_db)):
+def clear_commands(user_id: str, db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
 
     user.command = None
-    user.command_updated_at = datetime.utcnow()
     db.commit()
 
     return {"status": "cleared"}
 
 
 # ---------------------------------------------------------
-# CLEAR EVERYTHING
+# CLEAR ALL
 # ---------------------------------------------------------
 
 @app.post("/clear_all/{user_id}")
-def clear_all(user_id: str, user=Depends(verify_token), db=Depends(get_db)):
+def clear_all(user_id: str, db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
 
     # wipe fields
     user.first_name = None
-    user.last_name = None
+    user.last_id = None
     user.phone_number = None
     user.birthday = None
     user.birthday_year = None
@@ -552,7 +468,5 @@ def clear_all(user_id: str, user=Depends(verify_token), db=Depends(get_db)):
 
     user.command = None
 
-    user.updated_at = datetime.utcnow()
     db.commit()
-
     return {"status": "all_cleared"}
