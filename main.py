@@ -18,14 +18,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from sqlalchemy import Column, Integer, String, DateTime
+from sqlalchemy import Column, String, Integer, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy import create_engine
 
 
-# -------------------------------------------------
-# Database Setup
-# -------------------------------------------------
+# ---------------------------------------------------------
+# DATABASE SETUP
+# ---------------------------------------------------------
 
 Base = declarative_base()
 DATABASE_URL = "sqlite:///./sensus.db"
@@ -44,20 +44,17 @@ def get_db():
         db.close()
 
 
-# ADMIN KEY (for creating users)
 ADMIN_KEY = os.getenv("ADMIN_KEY")
 
 
-# -------------------------------------------------
-# Database Model
-# -------------------------------------------------
+# ---------------------------------------------------------
+# DATABASE MODEL
+# ---------------------------------------------------------
 
 class User(Base):
     __tablename__ = "users"
 
-    user_id = Column(String, primary_key=True, index=True)
-
-    # Permanent UUID auth token
+    user_id = Column(String, primary_key=True)
     auth_token = Column(String, nullable=True)
 
     # data_peek
@@ -94,9 +91,9 @@ class User(Base):
 Base.metadata.create_all(bind=engine)
 
 
-# -------------------------------------------------
-# Pydantic Models
-# -------------------------------------------------
+# ---------------------------------------------------------
+# SCHEMAS
+# ---------------------------------------------------------
 
 class UserSnapshot(BaseModel):
     user_id: str
@@ -142,9 +139,9 @@ class CommandUpdate(BaseModel):
     command: Optional[str] = None
 
 
-# -------------------------------------------------
-# Helper Functions
-# -------------------------------------------------
+# ---------------------------------------------------------
+# HELPERS
+# ---------------------------------------------------------
 
 def get_or_create_user(db, user_id: str):
     user = db.query(User).filter(User.user_id == user_id).first()
@@ -159,7 +156,7 @@ def get_or_create_user(db, user_id: str):
     return user
 
 
-def delete_screenshot_file(path: Optional[str]):
+def delete_screenshot(path: Optional[str]):
     if path and os.path.exists(path):
         os.remove(path)
 
@@ -168,22 +165,15 @@ def parse_partial_birthday(raw: str):
     try:
         parts = raw.split("-")
 
-        if len(parts) == 2:
-            a, b = int(parts[0]), int(parts[1])
-            if 1 <= a <= 12:
-                return None, a, b
-            return None, b, a
-
-        elif len(parts) == 3:
+        if len(parts) == 3:  # YYYY-MM-DD
             y, m, d = map(int, parts)
             return y, m, d
 
-        elif len(parts) == 2:
-            y, m = map(int, parts)
-            return y, m, None
+        if len(parts) == 2:  # MM-DD
+            m, d = map(int, parts)
+            return None, m, d
 
-        else:
-            raise ValueError()
+        raise ValueError()
 
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid birthday format")
@@ -198,9 +188,9 @@ def format_birthday_for_output(user):
     return user.birthday
 
 
-# -------------------------------------------------
-# Token Verification
-# -------------------------------------------------
+# ---------------------------------------------------------
+# TOKEN VERIFICATION
+# ---------------------------------------------------------
 
 def verify_token(
     user_id: str,
@@ -211,7 +201,6 @@ def verify_token(
         raise HTTPException(status_code=401, detail="Missing or invalid token")
 
     token = authorization.split("Bearer ")[1].strip()
-
     user = db.query(User).filter(User.user_id == user_id).first()
 
     if not user:
@@ -223,9 +212,9 @@ def verify_token(
     return user
 
 
-# -------------------------------------------------
-# FastAPI Setup
-# -------------------------------------------------
+# ---------------------------------------------------------
+# FASTAPI
+# ---------------------------------------------------------
 
 app = FastAPI()
 
@@ -234,46 +223,39 @@ app.add_middleware(
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*", "Authorization"],
 )
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
-# -------------------------------------------------
-# Root
-# -------------------------------------------------
-
 @app.get("/")
 def root():
-    return {"status": "FastAPI alive"}
+    return {"status": "ok"}
 
 
-# -------------------------------------------------
-# AUTH ROUTES
-# -------------------------------------------------
+# ---------------------------------------------------------
+# ADMIN: CREATE USER — NO HEADERS NEEDED
+# ---------------------------------------------------------
 
-@app.post("/auth/create_user")
-def create_user(
+@app.post("/auth/create_user_direct")
+def create_user_direct(
+    admin_key: str,
     payload: CreateUserRequest,
-    authorization: str = Header(None, alias="Authorization"),
     db=Depends(get_db)
 ):
     if ADMIN_KEY is None:
         raise HTTPException(status_code=500, detail="ADMIN_KEY not set")
 
-    if authorization != f"Bearer {ADMIN_KEY}":
+    if admin_key != ADMIN_KEY:
         raise HTTPException(status_code=403, detail="Invalid admin key")
 
     existing = db.query(User).filter(User.user_id == payload.user_id).first()
     if existing:
         existing.auth_token = str(uuid.uuid4())
         db.commit()
-        return {
-            "user_id": payload.user_id,
-            "token": existing.auth_token
-        }
+        return {"user_id": payload.user_id, "token": existing.auth_token}
 
     user = User(
         user_id=payload.user_id,
@@ -283,31 +265,27 @@ def create_user(
     db.commit()
     db.refresh(user)
 
-    return {
-        "user_id": payload.user_id,
-        "token": user.auth_token
-    }
+    return {"user_id": payload.user_id, "token": user.auth_token}
 
+
+# ---------------------------------------------------------
+# USER LOGIN
+# ---------------------------------------------------------
 
 @app.post("/auth/login")
 def login(payload: LoginRequest, db=Depends(get_db)):
     user = db.query(User).filter(User.user_id == payload.user_id).first()
     if not user or payload.token != user.auth_token:
         raise HTTPException(status_code=401, detail="Invalid login")
-
     return {"status": "login_success"}
 
 
-# -------------------------------------------------
+# ---------------------------------------------------------
 # USER SNAPSHOT
-# -------------------------------------------------
+# ---------------------------------------------------------
 
 @app.get("/user/{user_id}", response_model=UserSnapshot)
-def get_user_snapshot(
-    user_id: str,
-    db=Depends(get_db),
-    user=Depends(verify_token)
-):
+def get_user_snapshot(user_id: str, db=Depends(get_db), user=Depends(verify_token)):
     user = get_or_create_user(db, user_id)
 
     return UserSnapshot(
@@ -322,13 +300,13 @@ def get_user_snapshot(
         contact=user.contact,
         screenshot_path=user.screenshot_path,
         url=user.url,
-        command=user.command
+        command=user.command,
     )
 
 
-# -------------------------------------------------
+# ---------------------------------------------------------
 # DATA PEEK
-# -------------------------------------------------
+# ---------------------------------------------------------
 
 @app.get("/data_peek/{user_id}")
 def get_data_peek(user_id: str, user=Depends(verify_token), db=Depends(get_db)):
@@ -360,9 +338,9 @@ def update_data_peek(
         user.birthday_day = d
 
     for field in ["first_name", "last_name", "phone_number", "address"]:
-        value = getattr(payload, field)
-        if value is not None:
-            setattr(user, field, value)
+        val = getattr(payload, field)
+        if val is not None:
+            setattr(user, field, val)
 
     user.data_peek_updated_at = datetime.utcnow()
     db.commit()
@@ -371,11 +349,7 @@ def update_data_peek(
 
 
 @app.post("/data_peek/{user_id}/clear")
-def clear_data_peek(
-    user_id: str,
-    user_token=Depends(verify_token),
-    db=Depends(get_db)
-):
+def clear_data_peek(user_id: str, user_token=Depends(verify_token), db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
 
     user.first_name = None
@@ -384,7 +358,7 @@ def clear_data_peek(
     user.birthday = None
     user.birthday_year = None
     user.birthday_month = None
-    user.bbirthday_day = None
+    user.birthday_day = None
     user.address = None
 
     user.data_peek_updated_at = datetime.utcnow()
@@ -393,14 +367,13 @@ def clear_data_peek(
     return {"status": "cleared"}
 
 
-# -------------------------------------------------
+# ---------------------------------------------------------
 # NOTE PEEK
-# -------------------------------------------------
+# ---------------------------------------------------------
 
 @app.get("/note_peek/{user_id}")
 def get_note_peek(user_id: str, user=Depends(verify_token), db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
-
     return {
         "note_name": user.note_name,
         "note_body": user.note_body
@@ -428,11 +401,7 @@ def update_note_peek(
 
 
 @app.post("/note_peek/{user_id}/clear")
-def clear_note_peek(
-    user_id: str,
-    user_token=Depends(verify_token),
-    db=Depends(get_db)
-):
+def clear_note_peek(user_id: str, user_token=Depends(verify_token), db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
 
     user.note_name = None
@@ -443,9 +412,9 @@ def clear_note_peek(
     return {"status": "cleared"}
 
 
-# -------------------------------------------------
+# ---------------------------------------------------------
 # SCREEN PEEK
-# -------------------------------------------------
+# ---------------------------------------------------------
 
 @app.get("/screen_peek/{user_id}")
 def get_screen_peek(user_id: str, user=Depends(verify_token), db=Depends(get_db)):
@@ -459,11 +428,7 @@ def get_screen_peek(user_id: str, user=Depends(verify_token), db=Depends(get_db)
 
 
 @app.get("/screen_peek/{user_id}/screenshot")
-def download_screenshot(
-    user_id: str,
-    user=Depends(verify_token),
-    db=Depends(get_db)
-):
+def download_screenshot(user_id: str, user=Depends(verify_token), db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
 
     if not user.screenshot_path or not os.path.exists(user.screenshot_path):
@@ -483,12 +448,12 @@ async def update_screen_peek(
 ):
     user = get_or_create_user(db, user_id)
 
-    if screenshot is not None:
+    if screenshot:
         if user.screenshot_path:
-            delete_screenshot_file(user.screenshot_path)
+            delete_screenshot(user.screenshot_path)
 
         ext = os.path.splitext(screenshot.filename)[1]
-        file_path = os.path.join(UPLOAD_DIR, f"{user_id}_screenshot{ext}")
+        file_path = os.path.join(UPLOAD_DIR, f"{user_id}{ext}")
 
         with open(file_path, "wb") as f:
             f.write(await screenshot.read())
@@ -497,7 +462,6 @@ async def update_screen_peek(
 
     if contact is not None:
         user.contact = contact
-
     if url is not None:
         user.url = url
 
@@ -508,14 +472,10 @@ async def update_screen_peek(
 
 
 @app.post("/screen_peek/{user_id}/clear")
-def clear_screen_peek(
-    user_id: str,
-    user_token=Depends(verify_token),
-    db=Depends(get_db)
-):
+def clear_screen_peek(user_id: str, user_token=Depends(verify_token), db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
 
-    delete_screenshot_file(user.screenshot_path)
+    delete_screenshot(user.screenshot_path)
 
     user.contact = None
     user.url = None
@@ -527,9 +487,9 @@ def clear_screen_peek(
     return {"status": "cleared"}
 
 
-# -------------------------------------------------
+# ---------------------------------------------------------
 # COMMANDS
-# -------------------------------------------------
+# ---------------------------------------------------------
 
 @app.get("/commands/{user_id}")
 def get_commands(user_id: str, user=Depends(verify_token), db=Depends(get_db)):
@@ -554,11 +514,7 @@ def update_commands(
 
 
 @app.post("/commands/{user_id}/clear")
-def clear_commands(
-    user_id: str,
-    user_token=Depends(verify_token),
-    db=Depends(get_db)
-):
+def clear_commands(user_id: str, user_token=Depends(verify_token), db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
 
     user.command = None
@@ -568,15 +524,15 @@ def clear_commands(
     return {"status": "cleared"}
 
 
-# -------------------------------------------------
-# CLEAR ALL
-# -------------------------------------------------
+# ---------------------------------------------------------
+# CLEAR EVERYTHING
+# ---------------------------------------------------------
 
 @app.post("/clear_all/{user_id}")
 def clear_all(user_id: str, user=Depends(verify_token), db=Depends(get_db)):
     user = get_or_create_user(db, user_id)
 
-    # Clear all fields
+    # wipe fields
     user.first_name = None
     user.last_name = None
     user.phone_number = None
@@ -589,7 +545,7 @@ def clear_all(user_id: str, user=Depends(verify_token), db=Depends(get_db)):
     user.note_name = None
     user.note_body = None
 
-    delete_screenshot_file(user.screenshot_path)
+    delete_screenshot(user.screenshot_path)
     user.contact = None
     user.url = None
     user.screenshot_path = None
