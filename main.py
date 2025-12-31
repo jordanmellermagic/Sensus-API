@@ -3,14 +3,7 @@ import calendar
 from datetime import datetime
 from typing import Optional
 
-from fastapi import (
-    FastAPI,
-    HTTPException,
-    UploadFile,
-    File,
-    Form,
-    Depends,
-)
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -20,7 +13,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 
 # ---------------------------------------------------------
-# DATABASE SETUP
+# DATABASE
 # ---------------------------------------------------------
 
 Base = declarative_base()
@@ -41,11 +34,28 @@ def get_db():
         db.close()
 
 
-ADMIN_KEY = os.getenv("ADMIN_KEY")
+# ---------------------------------------------------------
+# HELPERS (CRITICAL)
+# ---------------------------------------------------------
+
+def normalize_user_id(raw: str) -> str:
+    return raw.strip()
+
+
+def get_user_or_404(db, user_id: str):
+    user_id = normalize_user_id(user_id)
+    user = db.query(User).filter(User.user_id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
+def touch(user):
+    user.updated_at = datetime.utcnow()
 
 
 # ---------------------------------------------------------
-# DATABASE MODEL
+# MODEL
 # ---------------------------------------------------------
 
 class User(Base):
@@ -54,32 +64,26 @@ class User(Base):
     user_id = Column(String, primary_key=True)
     password = Column(String, nullable=True)
 
-    # data_peek
-    first_name = Column(String, nullable=True)
-    last_name = Column(String, nullable=True)
-    phone_number = Column(String, nullable=True)
-    birthday = Column(String, nullable=True)
-    birthday_year = Column(Integer, nullable=True)
-    birthday_month = Column(Integer, nullable=True)
-    birthday_day = Column(Integer, nullable=True)
-    address = Column(String, nullable=True)
+    # data peek
+    first_name = Column(String)
+    last_name = Column(String)
+    phone_number = Column(String)
+    birthday = Column(String)
+    address = Column(String)
     data_peek_updated_at = Column(DateTime, default=datetime.utcnow)
 
-    # note_peek
-    note_name = Column(String, nullable=True)
-    note_body = Column(String, nullable=True)
+    # note peek
+    note_name = Column(String)
+    note_body = Column(String)
     note_peek_updated_at = Column(DateTime, default=datetime.utcnow)
 
-    # screen_peek
-    contact = Column(String, nullable=True)
-    screenshot_path = Column(String, nullable=True)
-    url = Column(String, nullable=True)
+    # screen peek
+    contact = Column(String)
+    url = Column(String)
+    screenshot_path = Column(String)
     screen_peek_updated_at = Column(DateTime, default=datetime.utcnow)
 
-    # commands
-    command = Column(String, nullable=True)
-    command_updated_at = Column(DateTime, default=datetime.utcnow)
-
+    command = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
@@ -91,92 +95,26 @@ Base.metadata.create_all(bind=engine)
 # SCHEMAS
 # ---------------------------------------------------------
 
-class CreateUserRequest(BaseModel):
-    user_id: str
-    password: str
-
-
-class ChangePasswordRequest(BaseModel):
-    old_password: str
-    new_password: str
-
-
 class LoginRequest(BaseModel):
     user_id: str
     password: str
 
 
 class DataPeekUpdate(BaseModel):
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    phone_number: Optional[str] = None
-    birthday: Optional[str] = None
-    address: Optional[str] = None
+    first_name: Optional[str]
+    last_name: Optional[str]
+    phone_number: Optional[str]
+    birthday: Optional[str]
+    address: Optional[str]
 
 
 class NotePeekUpdate(BaseModel):
-    note_name: Optional[str] = None
-    note_body: Optional[str] = None
-
-
-class CommandUpdate(BaseModel):
-    command: Optional[str] = None
+    note_name: Optional[str]
+    note_body: Optional[str]
 
 
 # ---------------------------------------------------------
-# HELPERS
-# ---------------------------------------------------------
-
-def get_user_or_404(db, user_id: str) -> User:
-    user = db.query(User).filter(User.user_id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return user
-
-
-def delete_screenshot(path: Optional[str]):
-    if path and os.path.exists(path):
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-
-
-def parse_birthday(raw: str):
-    try:
-        parts = raw.split("-")
-        if len(parts) == 3:
-            y, m, d = map(int, parts)
-            return y, m, d
-        if len(parts) == 2:
-            m, d = map(int, parts)
-            return None, m, d
-        raise ValueError()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid birthday format")
-
-
-def format_birthday(user: User):
-    if user.birthday_month and user.birthday_day:
-        month_name = calendar.month_abbr[user.birthday_month]
-        if user.birthday_year:
-            return f"{month_name} {user.birthday_day} {user.birthday_year}"
-        return f"{month_name} {user.birthday_day}"
-    return user.birthday
-
-
-def touch_updated(user: User):
-    user.updated_at = datetime.utcnow()
-
-
-def iso(dt: Optional[datetime]) -> Optional[str]:
-    if not dt:
-        return None
-    return dt.replace(microsecond=0).isoformat() + "Z"
-
-
-# ---------------------------------------------------------
-# FASTAPI SETUP
+# APP
 # ---------------------------------------------------------
 
 app = FastAPI()
@@ -184,7 +122,6 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -202,46 +139,13 @@ def root():
 # AUTH
 # ---------------------------------------------------------
 
-@app.post("/auth/create_user")
-def create_user(admin_key: str, payload: CreateUserRequest, db=Depends(get_db)):
-    if ADMIN_KEY is None or admin_key != ADMIN_KEY:
-        raise HTTPException(status_code=403, detail="Invalid admin key")
-
-    existing = db.query(User).filter(User.user_id == payload.user_id).first()
-    if existing:
-        existing.password = payload.password
-        touch_updated(existing)
-        db.commit()
-        return {"status": "updated"}
-
-    user = User(user_id=payload.user_id, password=payload.password)
-    db.add(user)
-    db.commit()
-    return {"status": "created"}
-
-
 @app.post("/auth/login")
 def login(payload: LoginRequest, db=Depends(get_db)):
-    user = get_user_or_404(db, payload.user_id)
-    if user.password != payload.password:
+    user_id = normalize_user_id(payload.user_id)
+    user = db.query(User).filter(User.user_id == user_id).first()
+    if not user or user.password != payload.password:
         raise HTTPException(status_code=403, detail="Invalid credentials")
     return {"status": "ok"}
-
-
-# ---------------------------------------------------------
-# USER PASSWORD
-# ---------------------------------------------------------
-
-@app.post("/user/{user_id}/change_password")
-def change_password(user_id: str, payload: ChangePasswordRequest, db=Depends(get_db)):
-    user = get_user_or_404(db, user_id)
-    if user.password != payload.old_password:
-        raise HTTPException(status_code=403, detail="Old password incorrect")
-
-    user.password = payload.new_password
-    touch_updated(user)
-    db.commit()
-    return {"status": "password_changed"}
 
 
 # ---------------------------------------------------------
@@ -255,9 +159,8 @@ def get_data_peek(user_id: str, db=Depends(get_db)):
         "first_name": user.first_name,
         "last_name": user.last_name,
         "phone_number": user.phone_number,
-        "birthday": format_birthday(user),
+        "birthday": user.birthday,
         "address": user.address,
-        "updated_at": iso(user.data_peek_updated_at),
     }
 
 
@@ -265,26 +168,12 @@ def get_data_peek(user_id: str, db=Depends(get_db)):
 def update_data_peek(user_id: str, payload: DataPeekUpdate, db=Depends(get_db)):
     user = get_user_or_404(db, user_id)
 
-    if payload.birthday is not None:
-        if payload.birthday.strip() == "":
-            user.birthday = None
-            user.birthday_year = None
-            user.birthday_month = None
-            user.birthday_day = None
-        else:
-            y, m, d = parse_birthday(payload.birthday)
-            user.birthday = payload.birthday
-            user.birthday_year = y
-            user.birthday_month = m
-            user.birthday_day = d
-
-    for field in ["first_name", "last_name", "phone_number", "address"]:
-        val = getattr(payload, field)
-        if val is not None:
-            setattr(user, field, val)
+    for field, value in payload.dict().items():
+        if value is not None:
+            setattr(user, field, value)
 
     user.data_peek_updated_at = datetime.utcnow()
-    touch_updated(user)
+    touch(user)
     db.commit()
     return {"status": "updated"}
 
@@ -299,7 +188,6 @@ def get_note_peek(user_id: str, db=Depends(get_db)):
     return {
         "note_name": user.note_name,
         "note_body": user.note_body,
-        "updated_at": iso(user.note_peek_updated_at),
     }
 
 
@@ -312,9 +200,8 @@ def update_note_peek(user_id: str, payload: NotePeekUpdate, db=Depends(get_db)):
     if payload.note_body is not None:
         user.note_body = payload.note_body
 
-    # IMPORTANT: name+body treated as one unit, so one timestamp.
     user.note_peek_updated_at = datetime.utcnow()
-    touch_updated(user)
+    touch(user)
     db.commit()
     return {"status": "updated"}
 
@@ -330,15 +217,14 @@ def get_screen_peek(user_id: str, db=Depends(get_db)):
         "contact": user.contact,
         "url": user.url,
         "screenshot_path": user.screenshot_path,
-        "updated_at": iso(user.screen_peek_updated_at),
     }
 
 
 @app.get("/screen_peek/{user_id}/screenshot")
-def download_screenshot(user_id: str, db=Depends(get_db)):
+def get_screenshot(user_id: str, db=Depends(get_db)):
     user = get_user_or_404(db, user_id)
     if not user.screenshot_path or not os.path.exists(user.screenshot_path):
-        raise HTTPException(status_code=404, detail="No screenshot found")
+        raise HTTPException(status_code=404, detail="No screenshot")
     return FileResponse(user.screenshot_path)
 
 
@@ -353,78 +239,17 @@ async def update_screen_peek(
     user = get_user_or_404(db, user_id)
 
     if screenshot:
-        if user.screenshot_path:
-            delete_screenshot(user.screenshot_path)
-
-        ext = os.path.splitext(screenshot.filename)[1]
-        path = os.path.join(UPLOAD_DIR, f"{user_id}{ext}")
-
+        path = os.path.join(UPLOAD_DIR, f"{user.user_id}.png")
         with open(path, "wb") as f:
             f.write(await screenshot.read())
-
         user.screenshot_path = path
-        user.screen_peek_updated_at = datetime.utcnow()
 
     if contact is not None:
         user.contact = contact
-        user.screen_peek_updated_at = datetime.utcnow()
-
     if url is not None:
         user.url = url
-        user.screen_peek_updated_at = datetime.utcnow()
 
-    touch_updated(user)
+    user.screen_peek_updated_at = datetime.utcnow()
+    touch(user)
     db.commit()
     return {"status": "updated"}
-
-
-# ---------------------------------------------------------
-# COMMANDS
-# ---------------------------------------------------------
-
-@app.get("/commands/{user_id}")
-def get_commands(user_id: str, db=Depends(get_db)):
-    user = get_user_or_404(db, user_id)
-    return {"command": user.command, "updated_at": iso(user.command_updated_at)}
-
-
-@app.post("/commands/{user_id}")
-def update_commands(user_id: str, payload: CommandUpdate, db=Depends(get_db)):
-    user = get_user_or_404(db, user_id)
-    user.command = payload.command
-    user.command_updated_at = datetime.utcnow()
-    touch_updated(user)
-    db.commit()
-    return {"status": "updated"}
-
-
-# ---------------------------------------------------------
-# CLEAR ALL
-# ---------------------------------------------------------
-
-@app.post("/clear_all/{user_id}")
-def clear_all(user_id: str, db=Depends(get_db)):
-    user = get_user_or_404(db, user_id)
-
-    user.first_name = None
-    user.last_name = None
-    user.phone_number = None
-    user.birthday = None
-    user.birthday_year = None
-    user.birthday_month = None
-    user.birthday_day = None
-    user.address = None
-
-    user.note_name = None
-    user.note_body = None
-
-    delete_screenshot(user.screenshot_path)
-    user.contact = None
-    user.url = None
-    user.screenshot_path = None
-
-    user.command = None
-
-    touch_updated(user)
-    db.commit()
-    return {"status": "all_cleared"}
