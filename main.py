@@ -20,18 +20,6 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 
 # ---------------------------------------------------------
-# OPTIONAL APNS SUPPORT (DISABLED SAFELY IF UNAVAILABLE)
-# ---------------------------------------------------------
-
-try:
-    from apns2.client import APNsClient
-    from apns2.payload import Payload
-    APNS_AVAILABLE = True
-except Exception:
-    APNS_AVAILABLE = False
-
-
-# ---------------------------------------------------------
 # DATABASE SETUP
 # ---------------------------------------------------------
 
@@ -181,6 +169,12 @@ def touch_updated(user: User):
     user.updated_at = datetime.utcnow()
 
 
+def iso(dt: Optional[datetime]) -> Optional[str]:
+    if not dt:
+        return None
+    return dt.replace(microsecond=0).isoformat() + "Z"
+
+
 # ---------------------------------------------------------
 # FASTAPI SETUP
 # ---------------------------------------------------------
@@ -263,6 +257,7 @@ def get_data_peek(user_id: str, db=Depends(get_db)):
         "phone_number": user.phone_number,
         "birthday": format_birthday(user),
         "address": user.address,
+        "updated_at": iso(user.data_peek_updated_at),
     }
 
 
@@ -301,7 +296,11 @@ def update_data_peek(user_id: str, payload: DataPeekUpdate, db=Depends(get_db)):
 @app.get("/note_peek/{user_id}")
 def get_note_peek(user_id: str, db=Depends(get_db)):
     user = get_user_or_404(db, user_id)
-    return {"note_name": user.note_name, "note_body": user.note_body}
+    return {
+        "note_name": user.note_name,
+        "note_body": user.note_body,
+        "updated_at": iso(user.note_peek_updated_at),
+    }
 
 
 @app.post("/note_peek/{user_id}")
@@ -313,6 +312,7 @@ def update_note_peek(user_id: str, payload: NotePeekUpdate, db=Depends(get_db)):
     if payload.note_body is not None:
         user.note_body = payload.note_body
 
+    # IMPORTANT: name+body treated as one unit, so one timestamp.
     user.note_peek_updated_at = datetime.utcnow()
     touch_updated(user)
     db.commit()
@@ -330,6 +330,7 @@ def get_screen_peek(user_id: str, db=Depends(get_db)):
         "contact": user.contact,
         "url": user.url,
         "screenshot_path": user.screenshot_path,
+        "updated_at": iso(user.screen_peek_updated_at),
     }
 
 
@@ -384,7 +385,7 @@ async def update_screen_peek(
 @app.get("/commands/{user_id}")
 def get_commands(user_id: str, db=Depends(get_db)):
     user = get_user_or_404(db, user_id)
-    return {"command": user.command}
+    return {"command": user.command, "updated_at": iso(user.command_updated_at)}
 
 
 @app.post("/commands/{user_id}")
