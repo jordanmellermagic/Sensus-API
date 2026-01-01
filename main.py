@@ -1,5 +1,4 @@
 import os
-import calendar
 from datetime import datetime
 from typing import Optional
 
@@ -8,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from sqlalchemy import Column, String, Integer, DateTime, create_engine
+from sqlalchemy import Column, String, DateTime, create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 
@@ -35,11 +34,15 @@ def get_db():
 
 
 # ---------------------------------------------------------
-# HELPERS (CRITICAL)
+# HELPERS
 # ---------------------------------------------------------
 
 def normalize_user_id(raw: str) -> str:
     return raw.strip()
+
+
+def touch(user):
+    user.updated_at = datetime.utcnow()
 
 
 def get_user_or_404(db, user_id: str):
@@ -50,10 +53,6 @@ def get_user_or_404(db, user_id: str):
     return user
 
 
-def touch(user):
-    user.updated_at = datetime.utcnow()
-
-
 # ---------------------------------------------------------
 # MODEL
 # ---------------------------------------------------------
@@ -62,7 +61,7 @@ class User(Base):
     __tablename__ = "users"
 
     user_id = Column(String, primary_key=True)
-    password = Column(String, nullable=True)
+    password = Column(String)
 
     # data peek
     first_name = Column(String)
@@ -70,20 +69,16 @@ class User(Base):
     phone_number = Column(String)
     birthday = Column(String)
     address = Column(String)
-    data_peek_updated_at = Column(DateTime, default=datetime.utcnow)
 
     # note peek
     note_name = Column(String)
     note_body = Column(String)
-    note_peek_updated_at = Column(DateTime, default=datetime.utcnow)
 
     # screen peek
     contact = Column(String)
     url = Column(String)
     screenshot_path = Column(String)
-    screen_peek_updated_at = Column(DateTime, default=datetime.utcnow)
 
-    command = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
@@ -94,6 +89,11 @@ Base.metadata.create_all(bind=engine)
 # ---------------------------------------------------------
 # SCHEMAS
 # ---------------------------------------------------------
+
+class CreateUserRequest(BaseModel):
+    user_id: str
+    password: str
+
 
 class LoginRequest(BaseModel):
     user_id: str
@@ -139,12 +139,31 @@ def root():
 # AUTH
 # ---------------------------------------------------------
 
+@app.post("/auth/create_user")
+def create_user(payload: CreateUserRequest, db=Depends(get_db)):
+    user_id = normalize_user_id(payload.user_id)
+
+    existing = db.query(User).filter(User.user_id == user_id).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="User already exists")
+
+    user = User(
+        user_id=user_id,
+        password=payload.password,
+    )
+    db.add(user)
+    db.commit()
+    return {"status": "created", "user_id": user_id}
+
+
 @app.post("/auth/login")
 def login(payload: LoginRequest, db=Depends(get_db)):
     user_id = normalize_user_id(payload.user_id)
     user = db.query(User).filter(User.user_id == user_id).first()
+
     if not user or user.password != payload.password:
         raise HTTPException(status_code=403, detail="Invalid credentials")
+
     return {"status": "ok"}
 
 
@@ -168,11 +187,10 @@ def get_data_peek(user_id: str, db=Depends(get_db)):
 def update_data_peek(user_id: str, payload: DataPeekUpdate, db=Depends(get_db)):
     user = get_user_or_404(db, user_id)
 
-    for field, value in payload.dict().items():
-        if value is not None:
-            setattr(user, field, value)
+    for k, v in payload.dict().items():
+        if v is not None:
+            setattr(user, k, v)
 
-    user.data_peek_updated_at = datetime.utcnow()
     touch(user)
     db.commit()
     return {"status": "updated"}
@@ -200,14 +218,13 @@ def update_note_peek(user_id: str, payload: NotePeekUpdate, db=Depends(get_db)):
     if payload.note_body is not None:
         user.note_body = payload.note_body
 
-    user.note_peek_updated_at = datetime.utcnow()
     touch(user)
     db.commit()
     return {"status": "updated"}
 
 
 # ---------------------------------------------------------
-# SCREEN PEEK
+# SCREEN PEEK (FILE UPLOAD – NOT BASE64)
 # ---------------------------------------------------------
 
 @app.get("/screen_peek/{user_id}")
@@ -223,8 +240,10 @@ def get_screen_peek(user_id: str, db=Depends(get_db)):
 @app.get("/screen_peek/{user_id}/screenshot")
 def get_screenshot(user_id: str, db=Depends(get_db)):
     user = get_user_or_404(db, user_id)
+
     if not user.screenshot_path or not os.path.exists(user.screenshot_path):
         raise HTTPException(status_code=404, detail="No screenshot")
+
     return FileResponse(user.screenshot_path)
 
 
@@ -249,7 +268,6 @@ async def update_screen_peek(
     if url is not None:
         user.url = url
 
-    user.screen_peek_updated_at = datetime.utcnow()
     touch(user)
     db.commit()
     return {"status": "updated"}
